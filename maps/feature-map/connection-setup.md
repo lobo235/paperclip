@@ -92,6 +92,13 @@ saved connection. Run a permitted read-only action with an eligible agent and
 verify its useful result. Try an ineligible agent and confirm denial. Repeat
 with a user who cannot install company-wide; the UI must not imply broad access.
 
+Daytona follows this same key/access wizard. Its native method exposes the
+published platform and Toolbox HTTP actions using provider sandbox IDs, without
+a Paperclip task or lease requirement. [Daytona browser setup](../../tests/e2e/daytona-connector.spec.ts)
+checks the catalog, password field, access controls, and optional organization
+pin. It does not submit a key or qualify a real provider account. See
+[Daytona](../../doc/connections/DAYTONA.md) for API-key authority and OAuth limits.
+
 ### `mcp-link`
 
 Automated: AppsConnect's generic MCP cases cover probe-driven auth, private or

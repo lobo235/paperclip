@@ -95,6 +95,13 @@ internal company-scoped maintenance operation, with no new agent endpoint. Verif
 restoration and active-run protection with `server/src/__tests__/skill-version-cache.test.ts`
 and the assembled heartbeat runtime-skill tests; live acceptance remains separate.
 
+Native runs with an empty effective or saved selection do not read skill files
+or wait for the company cache lock. Explicit references still require the existing
+skill authorization. Selected skills and legacy operational skills retain cache
+exclusion and immutable version pinning. This changes no agent endpoint or grant;
+the [configuration tests](../../server/src/__tests__/heartbeat-execution-configuration.test.ts)
+cover the held-lock boundary with real PostgreSQL.
+
 ## `policy`
 
 Review: `baseline`.

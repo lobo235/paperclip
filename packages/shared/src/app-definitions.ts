@@ -8,6 +8,7 @@ export const CONNECTABLE_APP_SLUGS = new Set([
   "responses-api", "messages-api", "chat-completions-api", "local",
   "agentmail",
   "browser-use-cloud",
+  "daytona",
   "cognee",
   ...SELF_SERVE_MCP_CANDIDATES.map((entry) => entry.slug),
   "monday",

@@ -665,6 +665,13 @@
       "catalogVisible": false,
       "localAsset": "/brands/apps/monday.png",
       "darkAsset": "/brands/apps/monday-dark.png"
+    },
+    {
+      "slug": "daytona",
+      "provider": "Daytona",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/daytona.svg",
+      "darkAsset": "/brands/apps/daytona-dark.svg"
     }
   ]
 }

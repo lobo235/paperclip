@@ -1,5 +1,6 @@
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
+import { executeDaytonaTool, isDaytonaConnection, isCurrentDaytonaCatalogEntry } from "./daytona.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
@@ -1398,8 +1399,9 @@ export function createToolGatewayService(
     const eligibleRows = rows.filter(
       ({ catalogEntry, connection, application }) =>
         !isRetiredComposioConnection(connection) &&
+        !(isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(catalogEntry)) &&
         !(isRailwayEndpoint(connection.config.url) && (isRailwayToolBlocked(catalogEntry.toolName) || (normalizeRailwayToolName(catalogEntry.toolName).startsWith(RAILWAY_TOOL_PREFIX) && connection.config.railwayApiStatus !== "available"))) &&
-        ((isBrowserUseConnection(connection) && application.type === "rest_api") ||
+        (((isBrowserUseConnection(connection) || isDaytonaConnection(connection)) && application.type === "rest_api") ||
         (connection.transport === "mcp_remote" &&
           application.type === "mcp_http") ||
         (connection.transport === "local_stdio" &&
@@ -1425,7 +1427,7 @@ export function createToolGatewayService(
       ({ catalogEntry, connection, application }, index) => {
         if (
           connection.transport !== "mcp_remote" &&
-          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection)
+          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection)
         ) {
           throw new Error(
             `Non-MCP connection ${connection.id} cannot be exposed through the MCP gateway`,
@@ -4840,7 +4842,7 @@ export function createToolGatewayService(
         ),
       )
       .limit(1);
-    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection))) {
+    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection))) {
       throw new ToolGatewayHttpError(
         404,
         `Tool "${tool.name}" not found`,
@@ -4862,6 +4864,9 @@ export function createToolGatewayService(
     }
     if (isRailwayEndpoint(connection.config.url) && isRailwayToolBlocked(entry.toolName)) {
       throw new ToolGatewayHttpError(403, "This Railway action cannot bind its effects to an approved target. Use redeploy, restart, or rollback for an existing deployment.", "railway_action_blocked");
+    }
+    if (isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(entry)) {
+      throw new ToolGatewayHttpError(409, "Daytona's action catalog changed. Review the updated actions in Permissions.", "daytona_catalog_changed");
     }
     return { entry, connection };
   }
@@ -5986,6 +5991,17 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
+    if (isDaytonaConnection(connection)) {
+      const budgetMs = Math.min(ms, 30_000);
+      const deadlineAt = Date.now() + budgetMs;
+      const signal = AbortSignal.timeout(budgetMs);
+      const data = await executeDaytonaTool({ binding: session, connection,
+        headers: await resolveCredentialHeaders(session, connection, grant),
+        request: (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
+          : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()),
+        toolName: entry.toolName, parameters, signal, deadlineAt });
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+    }
     if (isBrowserUseConnection(connection)) {
       const data = await browserUseService(db, options.remoteHttpRequest).execute(session, grant, invocationId!, entry.toolName, parameters);
       return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };

@@ -57,6 +57,12 @@ Automated: [policy service](../../server/src/__tests__/company-skill-policy-serv
 
 Manual: Enable the skill for one test agent and leave another without access. Run a small task on each, inspect the available skill context, then change the release/policy and verify the next eligible run uses the intended version.
 
+A Paperclip Runner run with no selected skills must proceed while another run
+holds the company skill-cache lock. A saved empty selection remains empty after
+later assignments. Selected skills and the legacy operational skill retain cache
+exclusion through version pinning. The [configuration regression](../../server/src/__tests__/heartbeat-execution-configuration.test.ts)
+uses a real PostgreSQL lock; live provider latency remains a separate check.
+
 ## Gotchas
 
 - The release picker requires `enableBetaSkills`. Do not invent an Instructions

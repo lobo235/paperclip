@@ -41,6 +41,11 @@ Server-side Git operations and GitHub gateway calls follow the same selection ru
 
 Managed commands disable ambient Git credential helpers, Git global/system configuration, host GitHub CLI configuration, and host SSH identity access. Per-operation GitHub CLI configuration is isolated in a writable configuration directory beneath the managed launcher directory. Missing credentials clear previous author and token values; no teammate, standing delegation, host token, or company-default user's account is substituted. Anonymous/local operations remain available where supported.
 
+OpenCode retains the controller-projected GitHub broker environment through
+runner startup and provider startup. Shell operations acquire credentials for
+the active run through that broker. They do not require a persistent GitHub CLI
+login or inherit an ambient host broker capability.
+
 Without a managed identity, local commits can use an explicitly configured
 repository identity or `git -c user.name=... -c user.email=...`. The launcher
 leaves author/committer environment variables unset and requires configured
@@ -61,6 +66,13 @@ project's package configuration. Sandbox command checks use
 the same sanitized environment as execution, so a CLI visible only in the
 provider's default environment cannot pass the launch check. Failed path
 discovery stops startup instead of silently falling back to a minimal path.
+
+Providers that declare concurrent sync support stage at most three independent
+launcher files at once. Other providers keep serial staging. Each file retains
+its content hash, upload lock, integrity check and atomic rename. A failed batch
+settles all started uploads before startup rejects; later files and the final
+permission step do not start. This changes startup scheduling, not credentials
+or callback transport selection.
 
 Scripts that previously read a persistent `GH_TOKEN` must use managed `git`, `gh`, or GitHub gateway tools. Managed execution skips legacy GitHub token bindings in agent, environment, project, and routine configuration before secret preflight. Configure personal or dedicated access through the GitHub connection instead. Directly invoking an unmanaged executable or retaining a token obtained during an earlier invocation is outside the managed invocation contract.
 

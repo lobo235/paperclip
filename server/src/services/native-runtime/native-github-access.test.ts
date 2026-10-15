@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { createNativeGitHubAccess, type NativeGitHubAccess } from "./native-github-access.js";
+import { OpenCodeServerDriver } from "@paperclipai/paperclip-runner";
+import { createCapabilityRunnerdProviderEnvironment } from "@paperclipai/paperclip-runner/live";
 const scope = { companyId: "company-a", agentId: "agent-a", issueId: "task-a" };
 const run = (runId: string) => ({ ...scope, runId });
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -80,6 +82,45 @@ function request(broker: NativeGitHubAccess, extra: RequestInit = {}, endpoint =
     method: "POST", body: "{}", headers: { authorization: `Bearer ${broker.env.PAPERCLIP_GITHUB_BRIDGE_TOKEN}`, "content-type": "application/json" }, ...extra,
   });
 }
+it.each([false, true])("resolves managed GitHub credentials from OpenCode shell operations (runner projection: %s)", async throughRunner => {
+  const b = await broker();
+  const command = path.join(b.root, "fake-opencode-server.mjs");
+  const fixture = new URL("../../../../packages/paperclip-runner/test/fixtures/fake-opencode-server.mjs", import.meta.url);
+  await writeFile(command, await readFile(fixture), { mode: 0o700 });
+  const source = { ...b.env, OPENROUTER_API_KEY: "fixture-provider-key", PAPERCLIP_API_KEY: "controller-must-not-cross" };
+  const environment = throughRunner ? createCapabilityRunnerdProviderEnvironment({
+    provider: "opencode",
+    options: { environment: source, stateDirectory: b.root },
+    identity: { runnerInstanceId: "runner-a", environmentLeaseId: "lease-a", runId: "a", normalizedSessionId: "github", turnId: "turn-a", itemId: "item-a" },
+    codexHome: path.join(b.root, "codex-home"),
+    runtimeContextPath: path.join(b.root, "context.json"),
+    hasRuntimeContext: false,
+  }) : source;
+  const driver = new OpenCodeServerDriver({
+    model: "openrouter/z-ai/glm-5.3", runtimeDirectory: b.root, command, environment,
+  });
+  const session = await driver.openSession({ runId: "a", normalizedSessionId: "github", workingDirectory: b.root });
+  cleanups.push(() => session.close({ reason: "test complete" }));
+  const operate = async () => {
+    await session.startTurn({ message: { role: "user", text: "managed-github-operation" } });
+    for await (const event of session.events()) {
+      if (event.eventType === "turn.completed") break;
+      if (event.eventType === "turn.failed") throw new Error("OpenCode fixture turn failed");
+    }
+    return JSON.parse(await readFile(path.join(b.root, "github", "data", "fake-github-operation.json"), "utf8"));
+  };
+  const releaseA = b.activate(run("a"));
+  expect(await operate()).toMatchObject({ stdout: "fixture-a", error: null });
+  releaseA();
+  const releaseB = b.activate(run("b"));
+  expect(await operate()).toMatchObject({ stdout: "fixture-b", error: null });
+  releaseB();
+  expect(await operate()).toMatchObject({ stdout: "anonymous", error: null });
+  expect(b.resolveCredentials.mock.calls.map(([binding]) => binding.runId)).toEqual(["a", "b"]);
+  const childEnvironment = JSON.parse(await readFile(path.join(b.root, "github", "data", "fake-environment.json"), "utf8"));
+  expect(childEnvironment.keys).not.toContain("PAPERCLIP_API_KEY");
+  expect(childEnvironment.githubTokenPresent).toBe(false);
+}, 30000);
 it("uses the selected duplex transport across credential rotation without file polling", async () => {
   const b = await broker(undefined, true, false, undefined, { enabled: true, capability: true });
   expect(b.bridgeModes).toEqual(["http2_v1"]);

@@ -7780,10 +7780,7 @@ export function issueRoutes(
           "This issue is linked to a closed workspace that cannot be reopened.",
       });
     } else {
-      res.status(503).json({
-        error:
-          "Could not reopen the workspace for this issue. Please try again.",
-      });
+      res.status(409).json({ error: result.message });
     }
     return null;
   }

@@ -542,7 +542,9 @@ private manifest before handing it to the controller; ordinary snapshot disposal
 removes that worker's temporary directory. A failed capture removes its temporary
 state before releasing its worker slot. This scheduling boundary does not replace
 source authorization, warm-stamp validation, Git identity checks or restore
-conflict detection. Legacy adapter snapshots remain inline.
+conflict detection. Legacy adapter snapshots remain inline. Snapshot-only workers
+do not load the adapter process-launch helpers. The directory merge loads those
+helpers when it resolves its instance-scoped lock root.
 
 ### Remote Codex model compatibility
 

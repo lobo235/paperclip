@@ -244,7 +244,7 @@ test('the bundled-dependency installs run together while the other packages are 
   // cleanup as it starts, with the results put back into dependency order
   // before every tarball is checked.
   const bundledSources = position('for (const entry of entries.filter(entry => entry.bundled)) stageSource(entry)');
-  const start = position("startBundledInstalls(entries.filter(entry => entry.bundled), { logDir: prefetched, cwd: repo })");
+  const start = position("startBundledInstalls(entries.filter(entry => entry.bundled), { logDir: prefetched, cwd: repo, env })");
   const registered = position('prefetches.push(...installs.map(({ handle }) => handle))');
   const otherSources = position('for (const entry of entries.filter(entry => !entry.bundled))');
   const join = position("await awaited('bundled', Promise.all(installs.map(({ handle }) => handle.done)))");
@@ -595,4 +595,20 @@ test('Pi admission verifies assembled host daemon identity and preserves the fla
     writeFileSync(manifestPath, 'null');
     await assert.rejects(verifyPiPackagedDaemon(server, flat, target, runnerBinaryTarget), /manifest must be an object/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('Pi setup overlaps independent probes only after the offline lifecycle and joins before admission', () => {
+  const source = readFileSync(new URL('../verify-grok-npm-install.mjs', import.meta.url), 'utf8');
+  const position = fragment => { const index = source.indexOf(fragment); assert.notEqual(index, -1, fragment); return index; };
+  const lifecycle = position("phase('lifecycle_rebuild')");
+  const start = position("prefetch('pi_setup', 'docker', piSetupArgs)");
+  const codex = position("const codex = JSON.parse(isolated(['node', '/packages/codex-probe.mjs'])");
+  const grok = position("phase('grok_probes')");
+  const join = position("await awaited('pi_setup', piSetupReady)");
+  const receipt = position("assert.equal(receipt.status, 'installed_verified')");
+  const probe = position("console.log(isolated(['node', '/packages/pi-public-install-probe.mjs'");
+  assert.ok(lifecycle < start && start < codex && codex < grok && grok < join && join < receipt && receipt < probe);
+  assert.ok(source.includes("piSetupArgs.splice(1, 0, '--name', piSetupContainer)"));
+  assert.ok(position("await stopPrefetches(prefetches)") < position("['rm', '--force', piSetupContainer]"));
 });

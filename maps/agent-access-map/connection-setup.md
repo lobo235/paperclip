@@ -83,6 +83,13 @@ remaining operations before qualifying the whole capability.
 Gaps: An initiation endpoint exists; it is not authorization to complete the person's
 credential flow.
 
+Daytona native setup uses an organization API key in the selected personal or
+company vault grant. It does not borrow sandbox-provider credentials or CLI
+login tokens. Agents use assigned provider tools through the normal run-bound
+gateway; they cannot export the key. [Database-backed fixtures](../../server/src/__tests__/daytona-connection.test.ts)
+cover selected vault ownership and gateway reads/writes with provider responses
+replaced by fixtures. Real provider authentication remains unqualified.
+
 ## `handoff`
 
 Review: `baseline`.

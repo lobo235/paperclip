@@ -44,6 +44,13 @@ Automated: [app detail tests](../../ui/src/pages/apps/AppDetail.test.tsx) cover 
 
 Manual: Run a read-only action with explicit inputs and inspect returned data and activity. Refresh discovery and review new actions. Revoke or disconnect only the disposable credential, then verify subsequent use fails with an actionable reconnect state.
 
+For Daytona, opening an older saved catalog discovers the current native
+contract. Removed diagnostic actions disappear from Permissions and agent
+discovery; new or changed actions require review. Existing Off/Allowed choices
+remain in place. [Daytona regressions](../../server/src/__tests__/daytona-connection.test.ts)
+cover shared/personal catalog upgrades, failed refresh, permission preservation,
+run-bound file transfers, and revocation with fixture provider responses.
+
 ## Gotchas
 
 - Connected does not imply an agent has access or an action is allowed.

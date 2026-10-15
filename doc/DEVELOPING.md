@@ -2022,6 +2022,11 @@ to unique managed `.trash-<UUID>` names. Deletion runs outside the preparation
 lock and resumes after a crash. Saved version and repository snapshot rows are
 retained, and normal runtime use restores missing caches without upstream access.
 
+Paperclip Runner preparation skips this lock when the effective selection has no
+skills or a saved selection is explicitly empty. It still records the empty
+version snapshot. Explicit skill references, selected versions, and the legacy
+operational skill keep their existing authorization and cache-lock requirements.
+
 The sweep also handles orphan version directories after explicit skill deletion,
 preserving captured run pins until they settle. Only recognized staging/trash
 names are eligible; unknown directories and symlinked paths are retained.
@@ -2497,6 +2502,9 @@ refs and files are verified reproducible. Shared project clones remain intact.
 Normal authorized reopening recreates a missing source and checks out the saved
 commit, even after upstream advances. Inaccessible upstream produces an explicit
 retryable restoration failure. It never substitutes the default branch.
+Reopening failures reject the consuming request with HTTP 409 before saving a
+comment or changing its task. The response preserves the restoration message, so
+the composer keeps an editable draft and permits retry after access is restored.
 
 Both enable switches default off. Rollback disables further expiration while
 leaving saved recipes and restoration support intact. Recovery archives, runner

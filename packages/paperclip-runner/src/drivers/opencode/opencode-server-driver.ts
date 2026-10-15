@@ -21,6 +21,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { parseOpenCodeReasoningMode, type OpenCodeReasoningMode } from "./reasoning-mode.js";
 import { annotateOmittedProviderText, parseOpenCodeSseFrames } from "./sse-frames.js";
+import { githubCredentialEnvironment } from "../../github-credential-environment.js";
 
 import {
   CODEX_SKILLLESS_BASE_INSTRUCTIONS,
@@ -2385,7 +2386,7 @@ async function startRuntime(input: {
       { mode: 0o600 },
     );
     const environment = sanitizedEnvironment(
-      input.options.environment ?? process.env,
+      input.options.environment,
       {
         HOME: isolatedHome,
         XDG_CONFIG_HOME: configHome,
@@ -2874,7 +2875,7 @@ async function* parseSse(
 }
 
 function sanitizedEnvironment(
-  source: NodeJS.ProcessEnv,
+  source: NodeJS.ProcessEnv | undefined,
   overrides: Record<string, string>,
 ): NodeJS.ProcessEnv {
   const allowed = [
@@ -2893,9 +2894,10 @@ function sanitizedEnvironment(
     "OPENROUTER_API_KEY",
   ];
   const result: NodeJS.ProcessEnv = {};
+  const candidate = source ?? process.env;
   for (const key of allowed)
-    if (source[key] !== undefined) result[key] = source[key];
-  return { ...result, ...overrides };
+    if (candidate[key] !== undefined) result[key] = candidate[key];
+  return { ...result, ...githubCredentialEnvironment(source ?? {}), ...overrides };
 }
 
 function sanitizedEnvironmentKeys(): string[] {
