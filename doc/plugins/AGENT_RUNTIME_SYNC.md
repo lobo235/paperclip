@@ -53,3 +53,27 @@ hooks. Filesystem publication and the database journal are not one filesystem
 transaction. A failed managed write must be repaired through the same API before
 claiming synchronization. Upstream repository detection remains owned by the
 source integration.
+
+
+## Skills
+
+Migration 0348 invalidates referencing agents when installed skill content,
+companion files, versions, source bindings, or identities change. Rename checks
+both old and new keys. String selections, structured selections, and supported
+legacy aliases are recognized. Unrelated agents and other companies receive no
+content invalidation. Policy and private-source access changes conservatively
+invalidate the company because inherited access can affect multiple agents.
+Source retry/lease bookkeeping and skill popularity counters do not emit changes.
+
+Assignment edits already use the configuration boundary. The runtime reader
+returns selected skill entries with host source paths and immutable version IDs.
+It uses the execution resolver, current agent access, the instance pin flag, and
+legacy operational-skill rules. It performs no upstream refresh. The resolver can
+rebuild an expired version cache from saved bytes. Slow materialization happens
+outside the agent row lock. The reader rechecks ownership and revision afterward;
+it retries concurrent changes three times and then returns a conflict.
+
+Pinned assignments receive conservative content invalidations too. Their resolved
+version and bytes stay pinned when pin support is enabled. Consumers can compare
+versions or destination hashes and avoid rewriting unchanged trees. Task-only
+skill mentions and a running task's saved version selection remain task-owned.

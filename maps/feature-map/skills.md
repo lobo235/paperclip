@@ -115,3 +115,9 @@ Sources: Source: [SkillStudio.tsx](../../ui/src/pages/SkillStudio.tsx), [company
 ### Documentation scope: Skills, Skill Studio, and teams
 
 Main library/Studio/source/policy and CLI team-install paths are mapped. Full source-provider conflicts, harness sync, and remote package variants remain; catalog UI is not a current top-level route.
+
+
+Installed skill updates and assignments can drive opt-in plugin runtime
+synchronization. Version pins remain effective. See
+[contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#skills) and
+[database coverage](../../server/src/__tests__/agent-runtime-skills.test.ts).

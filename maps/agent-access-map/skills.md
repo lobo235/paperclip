@@ -195,3 +195,11 @@ responsible person's other grants for an agent-created source.
 Initial automatic imports reserve company work credits before provider reads.
 Failures retain the reservation; completed jobs cannot replenish the queue's
 work allowance. Jobs remain durable and resume as company credits refill.
+
+
+Plugin runtime synchronization uses the agent's current skill access and immutable
+version resolver. A change to an installed skill invalidates its referencing
+agents. Private-source access changes also request reconciliation. This is a
+host-to-plugin hook, not a new agent-facing endpoint. See
+[contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#skills) and
+[database coverage](../../server/src/__tests__/agent-runtime-skills.test.ts).

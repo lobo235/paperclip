@@ -2423,6 +2423,13 @@
       "when": 1792100545989,
       "tag": "0347_flippant_imperial_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 348,
+      "version": "7",
+      "when": 1792101163248,
+      "tag": "0348_agent_skill_runtime_hooks",
+      "breakpoints": true
     }
   ]
 }

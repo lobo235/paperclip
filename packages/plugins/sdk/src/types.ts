@@ -1687,7 +1687,18 @@ export interface PluginApprovalsClient {
  * Requires `agents.read` for reads; `agents.pause` / `agents.resume` /
  * `agents.invoke` for write operations.
  */
+export interface PluginAgentRuntimeSkill {
+  key: string;
+  runtimeName: string;
+  source: string;
+  versionId?: string | null;
+  currentVersionId?: string | null;
+  sourceStatus?: "available" | "missing";
+  missingDetail?: string | null;
+}
+
 export interface PluginAgentRuntimeState {
+  skills: PluginAgentRuntimeSkill[];
   revision: string;
   agent: Agent;
   instructionsRootPath: string | null;

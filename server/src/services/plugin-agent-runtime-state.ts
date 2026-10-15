@@ -2,11 +2,16 @@ import { and, desc, eq } from "drizzle-orm";
 import { agents, plugins, pluginCompanySettings, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import type { PluginAgentRuntimeState } from "@paperclipai/plugin-sdk";
 import { agentRecordQueries } from "../lib/agent-records.js";
-import { forbidden } from "../errors.js";
+import { conflict, forbidden } from "../errors.js";
 import { deriveBundleState } from "./agent-instructions.js";
+import { companySkillService } from "./company-skills.js";
+import { withSkillActor } from "./skill-access.js";
+import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
+import { instanceSettingsService } from "./instance-settings.js";
 import { agentInstanceSecretService } from "./agent-instance-secrets.js";
 
-export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<PluginAgentRuntimeState | null> {
+async function readState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<Omit<PluginAgentRuntimeState, "skills"> | null> {
   return db.transaction(async tx => {
     const [agent] = await tx.select().from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.id, agentId))).for("share");
@@ -27,4 +32,23 @@ export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyI
       instanceSecrets: await agentInstanceSecretService(tx as unknown as Db).read({ companyId, agentId, pluginId }),
     };
   });
+}
+
+
+export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<PluginAgentRuntimeState | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const state = await readState(db, pluginId, companyId, agentId);
+    if (!state) return null;
+    const preference = readPaperclipSkillSyncPreference(state.agent.adapterConfig);
+    const settings = await instanceSettingsService(db).getExperimental();
+    const skills = await withSkillActor({ type: "agent", agentId, companyId, source: "agent_key" }, () =>
+      companySkillService(db).listRuntimeSkillEntries(companyId, {
+        selectionConfig: state.agent.adapterConfig, includeLegacy: state.agent.adapterType !== "paperclip_runner", snapshotLatest: true,
+        versionSelections: skillVersionSelectionMap(preference.desiredSkillEntries, { versionPinsEnabled: settings.enableBetaSkills }),
+      }));
+    const current = await readState(db, pluginId, companyId, agentId);
+    if (!current) return null;
+    if (current.revision === state.revision) return { ...current, skills };
+  }
+  throw conflict("Agent runtime changed while resolving synchronization inputs; retry");
 }
