@@ -334,6 +334,10 @@ export class AcpxRuntimeHost {
     if (preconfigured && options.permissionMode !== "approve-all") {
       throw new Error("preconfigured home currently requires ACPX approve-all; local permission rules still apply");
     }
+    // shortcut: qualify a read-only provider launch before enabling preconfigured ACPX planning.
+    if (preconfigured && options.providerPolicy?.readOnly) {
+      throw new Error("preconfigured ACPX read-only execution is not supported; use isolated mode or native Codex");
+    }
     const nativeMcp = preconfigured ? null : nativeMcpLaunchBinding(options.environment);
     if (nativeMcp?.name === "paperclip") {
       throw new Error("assigned native MCP name conflicts with the task bridge");

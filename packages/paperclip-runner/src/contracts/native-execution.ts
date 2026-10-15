@@ -412,6 +412,9 @@ export function parseNativeExecutionInput(value: unknown): NativeExecutionInput 
       throw new NativeExecutionInputError("input.homeMode must be isolated or preconfigured");
     }
     const selected = record(input.provider, "input.provider");
+    if (input.homeMode === "preconfigured" && selected.kind === "acpx" && input.executionMode === "plan") {
+      throw new NativeExecutionInputError("preconfigured ACPX read-only execution is not supported; use isolated mode or native Codex");
+    }
     if (input.homeMode === "preconfigured" && selected.kind === "acpx" && selected.permissionMode !== "approve-all") {
       throw new NativeExecutionInputError("preconfigured home currently requires ACPX approve-all; local permission rules still apply");
     }

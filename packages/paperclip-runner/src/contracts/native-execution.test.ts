@@ -109,6 +109,10 @@ describe("NativeExecutionInputV1", () => {
       runtimeContext: { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) },
     };
     expect(parseNativeExecutionInput(preconfigured)).toMatchObject({ homeMode: "preconfigured" });
+    for (const agent of ["claude", "codex"]) {
+      expect(() => parseNativeExecutionInput({ ...preconfigured, executionMode: "plan",
+        provider: { kind: "acpx", agent, permissionMode: "approve-all" } })).toThrow("preconfigured ACPX read-only execution is not supported");
+    }
     for (const permissionMode of ["approve-reads", "approve-paperclip", "deny-all"]) {
       expect(() => parseNativeExecutionInput({ ...preconfigured, provider: { kind: "acpx", agent: "codex", permissionMode } })).toThrow("requires ACPX approve-all");
     }

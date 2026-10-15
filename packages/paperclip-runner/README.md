@@ -764,6 +764,8 @@ Runner-owned protocol state remains separately denied. Execution is unattended: 
 ACPX rejects requests for approval. The initial ACPX mode requires the Runner
 setting `acpxPermissionMode: "approve-all"` (its default); other Runner modes are
 unqualified here and fail before launch. Local permission rules still apply.
+Preconfigured ACPX read-only/planning tasks also fail before provider launch
+until a read-only launch is qualified; use isolated mode or native Codex for planning.
 If local settings block a task, change them
 and retry. Existing blocked results and failure diagnostics report the outcome;
 a hook that also blocks the reporting tool can leave only a generic diagnostic.

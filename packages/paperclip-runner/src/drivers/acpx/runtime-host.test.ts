@@ -201,6 +201,15 @@ afterEach(async () => {
 });
 
 describe("ACPX runtime host", () => {
+  it.each(["claude", "codex"] as const)("rejects preconfigured read-only %s before provider admission", async agent => {
+    const fixture = await hostFixture();
+    const openRuntime = vi.fn();
+    await expect(AcpxRuntimeHost.open({ ...fixture.options, agent, permissionMode: "approve-all",
+      providerPolicy: { readOnly: true }, environment: { HOME: fixture.root, PAPERCLIP_RUNNER_HOME_MODE: "preconfigured" },
+    }, fixture.dependencies({ openRuntime }))).rejects.toThrow("preconfigured ACPX read-only execution is not supported");
+    expect(openRuntime).not.toHaveBeenCalled();
+  });
+
   it.each(["approve-reads", "approve-paperclip", "deny-all"] as const)("rejects unqualified preconfigured permission mode %s before admission", async permissionMode => {
     const fixture = await hostFixture();
     const openRuntime = vi.fn();
