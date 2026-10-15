@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { activityLog, agents, companies, createDb, pluginCompanySettings, pluginConfig, plugins, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -114,6 +114,21 @@ describeDatabase("agent runtime synchronization hooks", () => {
     await expect(pluginAgentRuntimeState(db, randomUUID(), companyId, agentId)).rejects.toMatchObject({ status: 403 });
     await db.insert(pluginCompanySettings).values({ companyId, pluginId, enabled: false });
     await expect(pluginAgentRuntimeState(db, pluginId, companyId, agentId)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("does not broadcast legacy lifecycle events to runtime listeners", async () => {
+    const notifications: string[] = [];
+    const listener = await db.$client.listen("paperclip_plugin_lifecycle", payload => { notifications.push(payload); });
+    try {
+      await db.transaction(async tx => {
+        await tx.insert(resourceLifecycleEvents).values({ companyId, resourceType: "project", resourceId: randomUUID(), action: "update" });
+        await tx.execute(sql`SELECT pg_notify('paperclip_plugin_lifecycle', 'barrier')`);
+      });
+      await vi.waitFor(() => expect(notifications).toContain("barrier"));
+      expect(notifications).toEqual(["barrier"]);
+      await db.update(agents).set({ name: "Notify runtime" }).where(eq(agents.id, agentId));
+      await vi.waitFor(() => expect(notifications).toEqual(["barrier", ""]));
+    } finally { await listener.unlisten(); }
   });
 
   it("wakes delivery after a commit on an independent database client, without polling", async () => {

@@ -65,7 +65,7 @@ $$;
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS paperclip_notify_plugin_lifecycle ON resource_lifecycle_events;
 CREATE TRIGGER paperclip_notify_plugin_lifecycle AFTER INSERT ON resource_lifecycle_events
-  FOR EACH ROW EXECUTE FUNCTION paperclip_notify_plugin_lifecycle();
+  FOR EACH ROW WHEN (NEW.resource_type = 'agent_runtime') EXECUTE FUNCTION paperclip_notify_plugin_lifecycle();
 --> statement-breakpoint
 INSERT INTO resource_lifecycle_events(company_id, resource_type, resource_id, action)
   SELECT company_id, 'agent_runtime', id, 'update' FROM agents a
