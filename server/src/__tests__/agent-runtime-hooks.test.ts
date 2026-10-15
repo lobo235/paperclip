@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, connect, type Socket } from "node:net";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -63,6 +64,12 @@ describeDatabase("agent runtime synchronization hooks", () => {
     expect(await events()).toContainEqual(expect.objectContaining({ resourceId: agentId, action: "update" }));
   });
 
+  it("records a managed reset even when only its supporting files changed", async () => {
+    const before = (await events()).length;
+    await db.insert(activityLog).values({ companyId, actorType: "plugin", actorId: pluginId, action: "plugin.managed_agent.reset", entityType: "agent", entityId: agentId });
+    expect(await events()).toHaveLength(before + 1);
+  });
+
   it("rolls configuration and its event back together and rejects a change when journaling fails", async () => {
     const before = await events();
     await expect(db.transaction(async tx => {
@@ -118,4 +125,44 @@ describeDatabase("agent runtime synchronization hooks", () => {
       expect(delivered().at(-1)![2]).toMatchObject({ companyId, resourceId: agentId, resourceType: "agent_runtime" });
     } finally { delivery.dispose(); await coordinator.stop(); await other.$client.end(); }
   });
+  it("recovers work committed during real listener connection loss without another write", async () => {
+    const target = new URL(database.connectionString);
+    const upstreamHost = target.hostname; const upstreamPort = Number(target.port);
+    let blocked = false;
+    const sockets = new Set<Socket>();
+    const proxy = createServer(client => {
+      if (blocked) { client.destroy(); return; }
+      const upstream = connect(upstreamPort, upstreamHost);
+      for (const socket of [client, upstream]) {
+        sockets.add(socket);
+        socket.on("error", () => { client.destroy(); upstream.destroy(); });
+        socket.on("close", () => { sockets.delete(socket); client.destroy(); upstream.destroy(); });
+      }
+      client.pipe(upstream); upstream.pipe(client);
+    });
+    await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", resolve));
+    target.hostname = "127.0.0.1"; target.port = String((proxy.address() as { port: number }).port);
+    const listenerDb = createDb(target.toString(), { connectTimeoutSeconds: 1 });
+    const call = vi.fn(async (_plugin, _method, event) => ({ eventId: event.id, status: "acknowledged" }));
+    const coordinator = createDeliveryWorkCoordinator({ owner: listenerDb, canRun: () => true, onError: () => {} });
+    const delivery = registerPluginLifecycleDelivery(coordinator, listenerDb, { call, isRunning: () => true, onConfigApplied: () => () => {} } as never, new EventEmitter() as never);
+    try {
+      await delivery.ready;
+      const inbox = pluginLifecycleInbox(db, pluginId);
+      await vi.waitFor(async () => expect(await inbox.list(companyId, 100, undefined, ["agent_runtime"])).toEqual([]), { timeout: 5000 });
+      await vi.waitFor(() => expect(coordinator.nextWakeAt()).toBeNull(), { timeout: 5000 });
+      blocked = true;
+      for (const socket of sockets) socket.destroy();
+      await db.update(agents).set({ name: "Changed while disconnected" }).where(eq(agents.id, agentId));
+      const queued = (await events()).at(-1)!;
+      expect(call.mock.calls.some(call => call[2].id === String(queued.id))).toBe(false);
+      blocked = false;
+      await vi.waitFor(() => expect(call.mock.calls.some(call => call[2].id === String(queued.id))).toBe(true), { timeout: 10000 });
+    } finally {
+      blocked = false; delivery.dispose(); await coordinator.stop(); await listenerDb.$client.end({ timeout: 1 });
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => proxy.close(() => resolve()));
+    }
+  }, 20000);
+
 });

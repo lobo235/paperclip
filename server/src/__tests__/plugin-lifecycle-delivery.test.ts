@@ -194,6 +194,20 @@ describePostgres("durable plugin lifecycle delivery", () => {
     await registry.upsertCompanySettings(pluginId, companyId, { enabled: true, settingsJson: {} });
     expect((await registry.getConfig(pluginId, companyId))?.configJson).toEqual({ first: true, second: true });
   }, 5000);
+  it("retries listener setup through durable delivery after an enable-time failure", async () => {
+    const d = delivery();
+    await d.worker.ready;
+    await db.update(plugins).set({ manifestJson: { resourceLifecycle: ["agent_runtime"], capabilities: ["events.subscribe"] } as never }).where(eq(plugins.id, pluginId));
+    const listen = vi.mocked(db.$client.listen);
+    listen.mockRejectedValueOnce(new Error("temporary listener outage"));
+    d.lifecycle.emit("plugin.enabled");
+    await expect(d.run()).rejects.toThrow("temporary listener outage");
+    expect(await d.pending()).toBe(true);
+    await d.run();
+    expect(listen).toHaveBeenCalledTimes(2);
+    expect(await d.pending()).toBe(false);
+    d.worker.dispose();
+  });
   it("records failed delivery scope and stage without provider secrets", async () => {
     await event(); const d = delivery();
     const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});

@@ -38,6 +38,7 @@ export function registerPluginLifecycleDelivery(
     async run(signal) {
       pending = false;
       try {
+        await ensureListening();
         for (const [key, at] of retryAt) if (at <= Date.now()) retryAt.delete(key);
         const configured = await db.select({ plugin: plugins, companyId: pluginConfig.companyId })
           .from(plugins).innerJoin(pluginConfig, eq(pluginConfig.pluginId, plugins.id))
@@ -109,15 +110,16 @@ export function registerPluginLifecycleDelivery(
   let listening: ReturnType<Db["$client"]["listen"]> | undefined;
   async function ensureListening() {
     if (disposed || !db.$client?.listen) return;
+    if (listening) return listening;
     const installed = await db.select({ manifest: plugins.manifestJson }).from(plugins).where(eq(plugins.status, "ready"));
     if (!disposed && installed.some(plugin => plugin.manifest.resourceLifecycle?.includes("agent_runtime"))) {
-      listening ??= db.$client.listen("paperclip_plugin_lifecycle", wake, wake);
-      return listening;
+      const attempt = listening ??= db.$client.listen("paperclip_plugin_lifecycle", wake, wake);
+      try { return await attempt; }
+      catch (error) { if (listening === attempt) listening = undefined; throw error; }
     }
   }
   function pluginChanged() {
     wake();
-    void ensureListening().catch(() => logger.warn("Plugin lifecycle database listener unavailable"));
   }
   const listenerReady = ensureListening();
   const unsubscribeConfig = manager.onConfigApplied(pluginChanged);

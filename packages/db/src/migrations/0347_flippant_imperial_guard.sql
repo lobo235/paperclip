@@ -44,7 +44,7 @@ CREATE OR REPLACE FUNCTION paperclip_agent_runtime_files_changed() RETURNS trigg
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NEW.entity_type = 'agent' AND NEW.action IN ('agent.files_updated', 'agent.instructions_path_updated',
-    'agent.instructions_bundle_updated', 'agent.instructions_file_updated', 'agent.instructions_file_deleted') THEN
+    'agent.instructions_bundle_updated', 'agent.instructions_file_updated', 'agent.instructions_file_deleted', 'plugin.managed_agent.reset') THEN
     PERFORM paperclip_record_agent_runtime(NEW.company_id, NEW.entity_id::uuid);
   END IF;
   RETURN NEW;
