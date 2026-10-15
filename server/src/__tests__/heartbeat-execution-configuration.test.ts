@@ -167,15 +167,21 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     if (managed && saved === "isolated") expect(prepare).toHaveBeenCalledOnce();
   });
 
-  it("dispatches preconfigured Runner preparation without acquiring managed auth or materializing assigned skills", async () => {
+  it.each(["agent", "task"] as const)("dispatches %s preconfigured Runner preparation without acquiring managed auth or materializing assigned skills", async source => {
     const f = await seed(true);
     const nativeHome = await mkdtemp(path.join(tmpdir(), "paperclip-preconfigured-preparation-"));
     const workspace = path.join(nativeHome, "workspace");
     await mkdir(workspace);
     process.env.PAPERCLIP_HOME = nativeHome;
     await db.update(agents).set({ adapterType: "paperclip_runner", adapterConfig: {
-      provider: "codex", model: "gpt-6.1-sol", homeMode: "preconfigured", cwd: workspace,
+      provider: "codex", model: "gpt-6.1-sol", homeMode: source === "agent" ? "preconfigured" : "isolated", cwd: workspace,
     } }).where(eq(agents.id, f.agentId));
+    if (source === "task") {
+      await db.update(issues).set({ assigneeAdapterOverrides: { adapterConfig: { homeMode: "preconfigured" } } }).where(eq(issues.id, f.issueId));
+      // A task override must take effect before even parsing/router-selecting
+      // an unrelated managed account, not just before credential preparation.
+      await db.update(agents).set({ runtimeConfig: { aiConnection: { mode: "router", connectionId: "unconfigured-pool" } } }).where(eq(agents.id, f.agentId));
+    }
     skillFailures.set(f.companyId, "Preconfigured mode must not resolve assigned skills");
     const prepare = vi.spyOn(aiRuntime, "prepareManagedAiRuntime");
     const beforeNative = vi.fn(async () => { throw new Error("fixture stopped before provider start"); });

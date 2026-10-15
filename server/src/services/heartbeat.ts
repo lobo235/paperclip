@@ -2488,7 +2488,10 @@ export function heartbeatService(
         : null;
       const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
       const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
-      if (agent.adapterType === "paperclip_runner") config = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
+      if (agent.adapterType === "paperclip_runner") {
+        const homeConfig = bindHeartbeatRunnerHomeMode({ ...config, ...issueAssigneeOverrides?.adapterConfig }, savedRouterInput);
+        if ("homeMode" in homeConfig) config = { ...config, homeMode: homeConfig.homeMode };
+      }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;
       const preconfiguredHome = agent.adapterType === "paperclip_runner" && config.homeMode === "preconfigured";
       const requestedAiBinding = preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
