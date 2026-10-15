@@ -1,5 +1,10 @@
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   AcpAgentRegistry,
@@ -29,6 +34,55 @@ const HANDLE: AcpRuntimeHandle = {
 };
 
 describe("Codex ACPX runtime adapter", () => {
+  it("admits an exact Claude model through the real ACP without a user model allowlist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "preconfigured-claude-model-"));
+    const home = join(root, "home"), cwd = join(root, "workspace"), config = join(home, ".claude");
+    await Promise.all([mkdir(config, { recursive: true }), mkdir(cwd)]);
+    const settings = JSON.stringify({ model: "claude-sonnet-5-5", permissions: { deny: ["Bash"] } });
+    await writeFile(join(config, "settings.json"), settings);
+    // Model validation can reach only this local fixture, never a provider.
+    const api = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* drain validation input */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ id: "msg_fixture", type: "message", role: "assistant", model: "claude-sonnet-5-5",
+        content: [{ type: "text", text: "OK" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+    await new Promise<void>(resolve => api.listen(0, "127.0.0.1", resolve));
+    const address = api.address() as { port: number };
+    const entry = createRequire(import.meta.url).resolve("@agentclientprotocol/claude-agent-acp/dist/index.js");
+    const command: VerifiedAcpxCommandLease = {
+      spawn: (args, input) => spawn(process.execPath, [entry, ...(args ?? [])], { ...input, detached: true, stdio: ["pipe", "pipe", "pipe"] }),
+      close: async () => undefined,
+    };
+    const options = { ...openOptions(command), profile: resolveQualifiedAcpxProfile("claude", "claude-sonnet-5-5"),
+      cwd, stateDirectory: join(root, "state"), permissionMode: "approve-all" as const,
+      launchEnvironment: { HOME: home, CLAUDE_CONFIG_DIR: config, PATH: "/usr/bin:/bin", TMPDIR: root,
+        PAPERCLIP_RUNNER_HOME_MODE: "preconfigured", ANTHROPIC_API_KEY: "local-fixture-only",
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+    };
+    let port: Awaited<ReturnType<typeof openCodexAcpxRuntime>> | undefined;
+    const priorSettingsFlag = process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
+    process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = "1";
+    try {
+      port = await openCodexAcpxRuntime(options, {
+        // This test exercises ACP/model admission; lifetime-fence tests are separate.
+        awaitProviderOwnership: async () => undefined,
+        awaitProviderExit: child => new Promise<void>(resolve => child.once("exit", () => resolve())),
+      });
+      expect(await port.getStatus()).toMatchObject({ models: { currentModelId: "claude-sonnet-5-5" } });
+      expect(await readFile(join(config, "settings.json"), "utf8")).toBe(settings);
+    } finally {
+      try { await port?.close({ reason: "exact model verified" }); }
+      finally {
+        if (priorSettingsFlag === undefined) delete process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS;
+        else process.env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS = priorSettingsFlag;
+        api.closeAllConnections();
+        await new Promise<void>(resolve => api.close(() => resolve()));
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
+
   it.each(["timeout", "cancel"] as const)("ends preconfigured Codex admission on %s while mode selection is stalled", async kind => {
     const runtime = fakeRuntime();
     let started!: () => void;
@@ -94,6 +148,10 @@ describe("Codex ACPX runtime adapter", () => {
     expect(created.nonInteractivePermissions).toBe("deny");
     expect(created.permissionPolicy).toMatchObject({ defaultAction: "deny", autoApprove: undefined, escalate: undefined });
     expect(created.spawnEnvironment!().PAPERCLIP_ACPX_ISOLATED_CONTEXT).toBeUndefined();
+    if (agent === "claude") expect(created.spawnEnvironment!()).toMatchObject({
+      ANTHROPIC_MODEL: options.profile.reportedModelId, ANTHROPIC_CUSTOM_MODEL_OPTION: options.profile.reportedModelId,
+    });
+    else expect(created.spawnEnvironment!().ANTHROPIC_CUSTOM_MODEL_OPTION).toBeUndefined();
     await expect(created.onPermissionRequest!({ sessionId: "backend-1", raw: {}, inferredKind: "execute" } as never,
       { signal: new AbortController().signal })).resolves.toEqual({ outcome: "reject_once" });
     if (agent === "codex") expect(runtime.setMode).toHaveBeenCalledWith({ handle: HANDLE, mode: "agent-full-access" });

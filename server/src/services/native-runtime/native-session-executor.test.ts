@@ -1,6 +1,6 @@
 import { trace } from "@opentelemetry/api";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
-import { configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
+import { configuredEnvironment, configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -12444,6 +12444,32 @@ describe("runnerd provider runtime wiring", () => {
     expect(state.createTransport.mock.calls[0]![0].runnerBinary).not.toBe(
       `${remoteCwd}/.paperclip-runtime/paperclip-runner/bin/paperclip-runnerd`,
     );
+  });
+
+  it("removes controller path bindings from the remote preconfigured environment manifest", async () => {
+    const paths = { CLAUDE_CONFIG_DIR: "/controller/claude", XDG_CONFIG_HOME: "/controller/config",
+      XDG_DATA_HOME: "/controller/data", XDG_CACHE_HOME: "/controller/cache" };
+    const runnerEnvironment = { ...configuredEnvironmentProjection({ ...paths, TASK_FLAG: "kept" }),
+      HOME: "/controller/home", CODEX_HOME: "/controller/codex", AMBIENT_FLAG: "not-task-bound" };
+    const remoteExecution = { ...execution, schema: "paperclip.native-execution-input.v7" as const,
+      homeMode: "preconfigured" as const, executionMode: "default" as const, planningContext: null,
+      provider: { kind: "codex" as const, model: null, approvalPolicy: "never" as const }, runtimeContext: nativeRuntimeContextFixture() };
+    const remoteExecute = vi.fn(async (command: { args?: string[] }) => ({
+      exitCode: 0, timedOut: false, stderr: "", stdout: command.args?.[1]?.includes("getent passwd") ? "/home/executor\n" : "",
+    }));
+    await createRunnerdBackend({ db: leaseDb(remoteExecution), execution: remoteExecution, runnerInstanceId: "remote-home-manifest",
+      runnerEnvironment, runnerIngressAuthorized: true, runnerExecutionTarget: {
+        kind: "remote", transport: "sandbox", remoteCwd: "/workspace", environmentId: "environment",
+        leaseId: "remote-home-manifest", providerKey: "daytona", effectiveCapabilities: { runnerWebSocketIngress: true },
+        runner: { execute: remoteExecute, syncIn: vi.fn(async () => undefined) },
+      } as never });
+    state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+    const environment = (state.createTransport.mock.calls.at(-1)![0] as RunnerTransportOptions & { environment: NodeJS.ProcessEnv }).environment;
+    expect(environment.HOME).toBe("/home/executor");
+    expect(environment.CODEX_HOME).toBeUndefined();
+    for (const key of Object.keys(paths)) expect(environment[key]).toBeUndefined();
+    expect(configuredEnvironment(environment)).toEqual({ TASK_FLAG: "kept", PAPERCLIP_CONFIGURED_ENV_KEYS: '["TASK_FLAG"]' });
+    expect(runnerEnvironment).toMatchObject(paths);
   });
 
   it("archives failover evidence with an explicitly replaced provider session", async () => {

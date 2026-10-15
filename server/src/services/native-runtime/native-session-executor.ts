@@ -12828,7 +12828,14 @@ async function createRunnerdBackendWithinSessionClaim(
         throw new Error("runner_preconfigured_remote_home_unavailable");
       }
       // Paths from the controller's account cannot select a remote account's config.
-      for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]) delete effectiveRunnerEnvironmentBase[key];
+      const hostPathKeys = new Set(["CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]);
+      const configured = configuredEnvironment(effectiveRunnerEnvironmentBase);
+      for (const key of hostPathKeys) delete effectiveRunnerEnvironmentBase[key];
+      if (configured.PAPERCLIP_CONFIGURED_ENV_KEYS !== undefined) {
+        effectiveRunnerEnvironmentBase.PAPERCLIP_CONFIGURED_ENV_KEYS = JSON.stringify(
+          Object.keys(configured).filter(key => key !== "PAPERCLIP_CONFIGURED_ENV_KEYS" && !hostPathKeys.has(key)),
+        );
+      }
       effectiveRunnerEnvironmentBase.HOME = home;
     } else {
       effectiveRunnerEnvironmentBase.HOME ??= userInfo().homedir;

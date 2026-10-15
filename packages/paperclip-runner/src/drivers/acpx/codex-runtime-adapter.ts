@@ -434,7 +434,11 @@ export async function openQualifiedAcpxRuntime(
       ...definedEnvironment(options.launchEnvironment),
       ...(options.profile.agent === "claude"
         ? {
-            ...(preconfigured ? {} : { PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1" }),
+            ...(preconfigured ? {
+              // Advertise the requested exact ID without rewriting user settings.
+              ANTHROPIC_MODEL: options.profile.reportedModelId,
+              ANTHROPIC_CUSTOM_MODEL_OPTION: options.profile.reportedModelId,
+            } : { PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1" }),
             // This URL comes from the runner-owned authenticated tool bridge,
             // never provider-supplied permission-request metadata.
             PAPERCLIP_ACPX_TASK_TOOL_BRIDGE_URL: options.mcpServers.find(
