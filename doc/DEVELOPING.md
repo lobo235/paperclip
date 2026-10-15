@@ -2022,6 +2022,11 @@ to unique managed `.trash-<UUID>` names. Deletion runs outside the preparation
 lock and resumes after a crash. Saved version and repository snapshot rows are
 retained, and normal runtime use restores missing caches without upstream access.
 
+Paperclip Runner preparation skips this lock when the effective selection has no
+skills or a saved selection is explicitly empty. It still records the empty
+version snapshot. Explicit skill references, selected versions, and the legacy
+operational skill keep their existing authorization and cache-lock requirements.
+
 The sweep also handles orphan version directories after explicit skill deletion,
 preserving captured run pins until they settle. Only recognized staging/trash
 names are eligible; unknown directories and symlinked paths are retained.

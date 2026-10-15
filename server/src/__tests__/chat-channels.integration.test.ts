@@ -1,4 +1,5 @@
 import { idleWorkSnapshot } from "../services/task-admission.js";
+import { stageReceiptReactionRemovals } from "../services/chat-receipt-reactions.js";
 import type { Db } from "@paperclipai/db";
 import * as activityLogModule from "../services/activity-log.js";
 import * as connectionCredentialBindings from "../services/connection-credential-bindings.js";
@@ -1758,6 +1759,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         | "questionFormOpenAuthorizationBarrier"
         | "questionResolutionPersistBarrier"
         | "reactionReplayEndpointLockBarrier"
+        | "receiptReactionTransportBarrier"
         | "reachAuthorizationBarrier"
         | "resolveNativeQuestion"
         | "renewCredentialMutationLease"
@@ -28007,6 +28009,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const fixture = await seedCompany();
       const statusCalls: string[] = [];
       const ordinaryFetch = fakeSlackFetch();
+      let releaseReceipt!: () => void;
+      const receiptGate = new Promise<void>((resolve) => { releaseReceipt = resolve; });
       let earlyFinal:
         | ((
             agentId: string,
@@ -28017,6 +28021,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         | undefined;
       const context = await configuredSlackEndpoint(fixture, {
         scheduleDeferredWork: () => undefined,
+        ...(mode === "final_before_add" ? { receiptReactionTransportBarrier: () => receiptGate } : {}),
         fetch: async (input, init) => {
           if (
             String(input) === "https://slack.com/api/agents.sessions.setStatus"
@@ -28089,8 +28094,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
                 eq(chatActions.kind, "receipt_reaction"),
               ),
             ),
-        ).resolves.toHaveLength(0);
+        ).resolves.toHaveLength(1);
         await publishFinal();
+        releaseReceipt();
         return { runId };
       };
       try {
@@ -28210,6 +28216,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         ).toHaveLength(1);
         expect(wakeup).toHaveBeenCalledTimes(mode === "newer_followup" ? 2 : 1);
       } finally {
+        releaseReceipt();
         // Retire the synthetic still-running retry's conversation so later
         // globally-scanned milestone fixtures cannot inherit this test's work.
         if (mode === "same_source_retry")
@@ -28420,6 +28427,152 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     }
   });
 
+  it.each(["attachment", "subscription", "wakeup"] as const)("acknowledges a Slack mention while %s is blocked", async (phase) => {
+    const fixture = await seedCompany();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = vi.fn();
+    const blocked = async () => { entered(); await gate; return { accepted: true }; };
+    const { callbacks, endpoint, runtime, service, wakeup } = await configuredSlackEndpoint(fixture, {
+      ...(phase === "wakeup" ? { wakeup: blocked } : {}),
+      ...(phase === "attachment" ? { storage: createStorageService().storage } : {}),
+    });
+    const thread = makeThread({ channelId: "CFAST", id: "slack:CFAST:1740000088.1" });
+    if (phase === "subscription") thread.thread.subscribe = async () => { await blocked(); };
+    const message = makeMessage({ id: "1740000088.1", text: "@maya acknowledge immediately", mentioned: true,
+      ...(phase === "attachment" ? { attachments: [{ type: "file", name: "receipt.txt", mimeType: "text/plain", fetchData: async () => { await blocked(); return Buffer.from("synthetic attachment"); } } as Attachment] } : {}),
+    });
+    const startedAt = performance.now();
+    const inbound = deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread, message, trigger: "mention" });
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalled(), { timeout: 3_000, interval: 10 });
+      await vi.waitFor(() => expect(runtime.endpoints.get(endpoint.id)!.reactions).toHaveLength(1), { timeout: 1_000, interval: 10 });
+      const [delivery] = await readChatDeliveriesByEndpointId(endpoint.id);
+      await vi.waitFor(async () => {
+        const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+        expect(receipt.status).toBe("processed");
+      }, { timeout: 1_000, interval: 10 });
+      const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+      expect(await readIssuesByCompanyId(fixture.companyId)).toHaveLength(1);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, fixture.companyId))).toHaveLength(0);
+      process.stdout.write(`Slack ${phase} blocked: eyes confirmed in ${(performance.now() - startedAt).toFixed(1)}ms; durable receipt to confirmed action ${receipt.updatedAt.getTime() - delivery.receivedAt.getTime()}ms (synthetic Slack, real PostgreSQL)\n`);
+    } finally {
+      release();
+      await inbound;
+    }
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread, message, trigger: "mention" });
+    expect(runtime.endpoints.get(endpoint.id)!.reactions).toHaveLength(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
+  it.each(["attachment", "subscription"] as const)("preserves an early Slack receipt failure after %s acceptance", async phase => {
+    const fixture = await seedCompany();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = vi.fn();
+    const block = async () => { entered(); await gate; };
+    const { callbacks, endpoint, runtime, service } = await configuredSlackEndpoint(fixture, {
+      ...(phase === "attachment" ? { storage: createStorageService().storage } : {}),
+    });
+    const provider = runtime.endpoints.get(endpoint.id)!;
+    provider.reactionErrors.push(Object.assign(new Error("missing_scope"), { code: "slack_webapi_platform_error", data: { error: "missing_scope" } }));
+    const reaction = vi.spyOn(provider, "applySlackReceiptReaction");
+    const thread = makeThread({ channelId: "CEARLYERROR", id: "slack:CEARLYERROR:1740000091.1" });
+    if (phase === "subscription") thread.thread.subscribe = block;
+    const message = makeMessage({ id: "1740000091.1", text: "@maya preserve the receipt warning", mentioned: true,
+      ...(phase === "attachment" ? { attachments: [{ type: "file", name: "receipt.txt", mimeType: "text/plain", fetchData: async () => { await block(); return Buffer.from("synthetic attachment"); } } as Attachment] } : {}),
+    });
+    const inbound = deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread, message, trigger: "mention" });
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalled(), { timeout: 3_000, interval: 10 });
+      const [delivery] = await readChatDeliveriesByEndpointId(endpoint.id);
+      await vi.waitFor(async () => {
+        const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+        expect(receipt).toMatchObject({ status: "failed", result: { redactedError: expect.stringContaining("missing_scope") } });
+      }, { timeout: 1_000, interval: 10 });
+      expect((await readChatDeliveriesByEndpointId(endpoint.id))[0].state).toBe("processing");
+      release();
+      await inbound;
+      expect((await readChatDeliveriesByEndpointId(endpoint.id))[0]).toMatchObject({
+        state: "processed", redactedError: expect.stringMatching(/Receipt reaction .*missing_scope/),
+      });
+      expect(reaction).toHaveBeenCalledTimes(1);
+    } finally { release(); await inbound; await service.shutdown(); }
+  });
+
+  it.each(["confirmed", "already reacted"] as const)("keeps an omitted-file warning after an early Slack receipt failure and %s retry", async outcome => {
+    const fixture = await seedCompany();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = vi.fn();
+    const { callbacks, endpoint, runtime, service } = await configuredSlackEndpoint(fixture, { storage: createStorageService().storage });
+    const provider = runtime.endpoints.get(endpoint.id)!;
+    provider.reactionErrors.push(Object.assign(new Error("missing_scope\nsynthetic provider detail"), { code: "slack_webapi_platform_error", data: { error: "missing_scope" } }));
+    if (outcome === "already reacted") provider.reactionErrors.push(Object.assign(new Error("already reacted"), { code: "slack_webapi_platform_error", data: { error: "already_reacted" } }));
+    const reaction = vi.spyOn(provider, "applySlackReceiptReaction");
+    const thread = makeThread({ channelId: "COMITTEDERROR", id: "slack:COMITTEDERROR:1740000092.1" });
+    const inbound = deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread, trigger: "mention",
+      message: makeMessage({ id: "1740000092.1", text: "@maya retain both warnings", mentioned: true,
+        attachments: [{ type: "file", name: "omitted.txt", mimeType: "text/plain", fetchData: async () => { entered(); await gate; throw new Error("controlled file download failure"); } } as Attachment],
+      }),
+    });
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalled(), { timeout: 3_000, interval: 10 });
+      const [delivery] = await readChatDeliveriesByEndpointId(endpoint.id);
+      await vi.waitFor(async () => {
+        const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+        expect(receipt.status).toBe("failed");
+      }, { timeout: 1_000, interval: 10 });
+      release();
+      await inbound;
+      const before = (await readChatDeliveriesByEndpointId(endpoint.id))[0];
+      expect(before.redactedError).toContain("Receipt reaction");
+      expect(before.redactedError).toContain("1 external attachment was omitted");
+      expect(reaction).toHaveBeenCalledTimes(1);
+      const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+      await db.update(chatActions).set({ result: { ...receipt.result, retryable: true, retryAt: new Date(0).toISOString() } }).where(eq(chatActions.id, receipt.id));
+      await service.processPendingReceiptReactions(1, receipt.id);
+      const after = (await readChatDeliveriesByEndpointId(endpoint.id))[0];
+      expect(after.redactedError).toContain("1 external attachment was omitted");
+      expect(after.redactedError).not.toContain("Receipt reaction");
+      expect(after.redactedError).not.toContain("synthetic provider detail");
+      expect(reaction).toHaveBeenCalledTimes(2);
+      expect((await readChatActionsById(receipt.id))[0].status).toBe("processed");
+    } finally { release(); await inbound; await service.shutdown(); }
+  });
+
+  it("acknowledges a signed URL mention through the real Slack SDK without waiting for an unfurl", async () => {
+    const fixture = await seedCompany();
+    const { endpoint, runtime, service, wakeup } = await configuredSlackEndpoint(fixture);
+    const pinned = createChatSdkEndpointRuntime({ ...runtime.configurations.get(endpoint.id)!, logger: "silent" });
+    const threadId = "slack:CFASTSDK:1740000090.1";
+    const adapter = pinned.thread(threadId).adapter as unknown as {
+      _client: { auth: { test: (...args: unknown[]) => Promise<unknown> }; users: { info: (...args: unknown[]) => Promise<unknown> } };
+    };
+    adapter._client.auth.test = vi.fn(async () => ({ ok: true, user_id: "UBOT", user: "maya", team_id: "T-PAPERCLIP" }));
+    adapter._client.users.info = vi.fn(async () => ({ ok: true, user: { id: "USENDER", profile: { display_name: "Test sender" } } }));
+    const startedAt = performance.now();
+    try {
+      const response = await pinned.handleWebhook(signedSlackWebhookRequest({
+        url: `https://paperclip.example/api/chat-webhooks/${endpoint.publicId}/slack`, contentType: "application/json",
+        body: JSON.stringify({ type: "event_callback", event_id: "EvFASTSDK", team_id: "T-PAPERCLIP",
+          event: { type: "app_mention", channel: "CFASTSDK", user: "USENDER", ts: "1740000090.1", text: "<@UBOT> review <https://example.com/review|this link>" },
+        }),
+      }));
+      expect(response.status).toBe(200);
+      await vi.waitFor(() => expect(runtime.endpoints.get(endpoint.id)!.reactions).toEqual([
+        { threadId, messageId: "1740000090.1", emoji: "eyes" },
+      ]), { timeout: 1_000, interval: 10 });
+      expect(wakeup).toHaveBeenCalledTimes(1);
+      expect(adapter._client.users.info).toHaveBeenCalled();
+      process.stdout.write(`Signed URL mention through real Slack SDK: eyes confirmed in ${(performance.now() - startedAt).toFixed(1)}ms (real PostgreSQL, simulated provider APIs)\n`);
+    } finally {
+      await pinned.shutdown();
+      await service.shutdown();
+    }
+  });
+
   it("settles a retried Slack receipt reaction when the provider reports already_reacted", async () => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, runtime, service } =
@@ -28502,6 +28655,37 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     ).resolves.toEqual([{ redactedError: null }]);
     expect(endpointRuntime.reactionErrors).toEqual([]);
     await service.shutdown();
+  });
+
+  it.each([false, true])("clears an older multi-line Slack receipt diagnostic on terminal removal with attachment warning %s", async hasAttachmentWarning => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, runtime, service } = await configuredSlackEndpoint(fixture);
+    try {
+      const thread = makeThread({ channelId: "COLDWARNING", id: "slack:COLDWARNING:1740000093.1" });
+      await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread, trigger: "mention",
+        message: makeMessage({ id: "1740000093.1", text: "@maya clear an older receipt diagnostic", mentioned: true }),
+      });
+      const [delivery] = await readChatDeliveriesByEndpointId(endpoint.id);
+      const [receipt] = await readChatActionsByProviderActionId(`receipt_reaction:${delivery.id}`);
+      const diagnostic = "Receipt reaction failed after 1 attempt (endpoint_attention): missing_scope\nsynthetic provider detail";
+      const attachmentWarning = "1 external attachment was omitted";
+      await db.update(chatActions).set({ status: "failed", result: { attempts: 1, retryable: false, redactedError: diagnostic } }).where(eq(chatActions.id, receipt.id));
+      await db.update(chatDeliveries).set({ redactedError: diagnostic + (hasAttachmentWarning ? `\n${attachmentWarning}` : "") }).where(eq(chatDeliveries.id, delivery.id));
+      const [conversation] = await service.listConversations(endpoint.id);
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.assignedAgentId, status: "succeeded",
+        contextSnapshot: await chatWakeContext({ endpointId: endpoint.id, issueId: conversation.issueId, provider: "slack", providerMessageId: "1740000093.1" }),
+      });
+      const removalIds = await db.transaction(tx => stageReceiptReactionRemovals(tx as unknown as Db, {
+        endpoint, binding: { companyId: fixture.companyId, endpointId: endpoint.id, conversationId: conversation.id, issueId: conversation.issueId }, runId,
+        runtimeContext: { generation: Number(receipt.payload.runtimeGeneration), credentialFingerprint: String(receipt.payload.credentialFingerprint) },
+      }));
+      expect(removalIds).toHaveLength(1);
+      await service.processPendingReceiptReactions(1, removalIds[0]);
+      expect(runtime.endpoints.get(endpoint.id)!.removedReactions).toEqual([{ threadId: thread.thread.id, messageId: "1740000093.1", emoji: "eyes" }]);
+      expect((await readChatActionsById(removalIds[0]))[0].status).toBe("processed");
+      expect((await readChatDeliveriesByEndpointId(endpoint.id))[0].redactedError).toBe(hasAttachmentWarning ? attachmentWarning : null);
+    } finally { await service.shutdown(); }
   });
 
   it("canonicalizes prefixed Chat SDK channel ids onto provider inventory resources", async () => {

@@ -9,6 +9,10 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, companyMemberships, companySkills, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { companySkillService } from "../services/company-skills.js";
+import { secretService } from "../services/secrets.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
+import { withSkillVersionCacheLock } from "../services/skill-version-cache.js";
+import { prepareHeartbeatExecutionConfiguration } from "../services/heartbeat/execution-configuration.js";
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { HttpError } from "../errors.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -102,6 +106,75 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     expect(finished).toBeDefined();
     return { finished, input: captured.get(run!.id) };
   }
+
+  async function configuration(f: Awaited<ReturnType<typeof seed>>, config: Record<string, unknown>, snapshot: Record<string, unknown> = {}, type = "paperclip_runner") {
+    const [agent] = await db.update(agents).set({ adapterType: type, adapterConfig: config }).where(eq(agents.id, f.agentId)).returning();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, scopeKind: "issue", status: "running", contextSnapshot: snapshot }).returning();
+    const resolvedInstanceSettings = await instanceSettingsService(db).get();
+    return { run, prepare: () => prepareHeartbeatExecutionConfiguration(db, {
+      run, agent,
+      task: { issueId: f.issueId, context: { ...snapshot, issueId: f.issueId }, responsibleUserId: null,
+        acceptedPlanContinuationWake: false, acceptedPlanWakeRoutingDecision: null,
+        taskProjectContext: null, routineEnvContext: { routineId: null, env: null, responsibleUserId: null } },
+      config: { sourceWorkspaceConfig: config, aiBinding: undefined },
+      policy: { trustPreset: { kind: "standard", preset: "standard", boundary: null, sourcePresets: {} }, useIsolatedTaskDirectory: false, explicitTaskDirectory: false },
+      environment: { selectedEnvironmentId: null, selectedEnvironmentForConfig: null,
+        resolvedInstanceSettings, persistedNativeExecutionInput: null },
+      services: { secretsSvc: secretService(db), companySkills: companySkillService(db), appendRunEvent: vi.fn(), finalizeAiConnectionBusyDeferral: vi.fn() },
+      onFailureSecretsResolved: () => {}, onManagedAiRuntimeAcquired: () => {}, onIdentityRedactorPrepared: () => {},
+    }) };
+  }
+
+  it.each(["fresh", "saved empty"])("prepares a %s native skill selection while another run holds the company cache lock", async kind => {
+    const f = await seed();
+    const selected = kind === "saved empty" ? await companySkillService(db).createLocalSkill(f.companyId, { name: "Later assignment" }) : null;
+    const input = await configuration(f, selected ? { paperclipSkillSync: { desiredSkills: [selected.key] } } : {},
+      kind === "saved empty" ? { skillVersions: {}, skillSelectionSnapshot: true } : {});
+    let release!: () => void;
+    let acquired!: () => void;
+    const ready = new Promise<void>(resolve => { acquired = resolve; });
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const holder = withSkillVersionCacheLock(db, f.companyId, async () => { acquired(); await barrier; });
+    await ready;
+    const started = performance.now();
+    const pending = input.prepare();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([pending, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 2000); })]);
+      expect(result, "An empty native selection must not queue behind skill hydration").not.toBeNull();
+      console.info("Empty-skill preparation under a held cache lock", { kind, elapsedMs: performance.now() - started });
+      expect(result?.prepared).toBe(true);
+      if (result?.prepared) expect(result.runtimeSkillEntries).toEqual([]);
+      const [saved] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.run.id));
+      expect(saved.contextSnapshot).toMatchObject({ skillVersions: {}, skillSelectionSnapshot: true });
+    } finally {
+      if (timer) clearTimeout(timer);
+      release();
+      await holder;
+      await pending;
+    }
+  });
+
+  it.each(["selected native", "legacy operational"])("retains the cache exclusion for %s skills", async kind => {
+    const f = await seed();
+    const selected = await companySkillService(db).createLocalSkill(f.companyId, { name: "Selected lock control" });
+    const input = await configuration(f, { paperclipSkillSync: { desiredSkills: kind === "selected native" ? [selected.key] : [] } }, {}, kind === "selected native" ? "paperclip_runner" : "codex_local");
+    let release!: () => void;
+    let acquired!: () => void;
+    const ready = new Promise<void>(resolve => { acquired = resolve; });
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const holder = withSkillVersionCacheLock(db, f.companyId, async () => { acquired(); await barrier; });
+    await ready;
+    let settled = false;
+    const pending = input.prepare().finally(() => { settled = true; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(settled).toBe(false);
+    } finally { release(); await holder; }
+    const result = await pending;
+    expect(result.prepared).toBe(true);
+    if (result.prepared) expect(result.runtimeSkillEntries.some(entry => entry.key === (kind === "selected native" ? selected.key : "paperclipai/paperclip/paperclip"))).toBe(true);
+  });
 
   it("applies project environment and issue overrides and replaces caller-supplied runtime fields", async () => {
     const f = await seed();

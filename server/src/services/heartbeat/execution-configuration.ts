@@ -209,10 +209,13 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   const nativeRunnerPreparationSpans: NativeRunHistoricalSpan[] = [];
   const skillsPrepareStartedAtMs = Date.now();
   let skillDeliveryConfig = effectiveResolvedConfig;
-  const runtimeSkillEntries = await time("configuration_skills", () => withSkillVersionCacheLock(db, agent.companyId, async () => {
+  const storedVersions = parseObject(run.contextSnapshot?.skillVersions);
+  const hasStoredVersions = Object.prototype.hasOwnProperty.call(run.contextSnapshot ?? {}, "skillVersions");
+  const emptySkillSelection = hasStoredVersions
+    ? run.contextSnapshot?.skillSelectionSnapshot === true && Object.keys(storedVersions).length === 0
+    : agent.adapterType === "paperclip_runner" && runtimeSkillPreference.desiredSkills.length === 0;
+  const prepareSkills = async () => {
     try {
-      const storedVersions = parseObject(run.contextSnapshot?.skillVersions);
-      const hasStoredVersions = Object.prototype.hasOwnProperty.call(run.contextSnapshot ?? {}, "skillVersions");
       const versionSelections = hasStoredVersions
         ? new Map(Object.entries(storedVersions).filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === "string"))
         : skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries, {
@@ -264,7 +267,10 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
       }
       throw error;
     }
-  }));
+  };
+  const runtimeSkillEntries = await time("configuration_skills", () => emptySkillSelection
+    ? prepareSkills()
+    : withSkillVersionCacheLock(db, agent.companyId, prepareSkills));
   nativeRunnerPreparationSpans.push({
     name: "skills.prepare",
     parentName: "task.prepare",
