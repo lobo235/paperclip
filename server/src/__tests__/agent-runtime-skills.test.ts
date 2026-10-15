@@ -87,7 +87,9 @@ describeDatabase("skill runtime invalidation", () => {
     const assigned = await agent();
     const [project] = await db.insert(projects).values({ companyId, name: "Private source", visibility: "private" }).returning();
     const [source] = await db.insert(companySkillSources).values({ companyId, repositoryUrl: "https://github.com/fixture/private", fullName: "fixture/private", trackingRef: "HEAD", accessScope: "projects" }).returning();
+    await db.update(companySkills).set({ accessSourceId: source.id }).where(eq(companySkills.id, skillId));
     const [binding] = await db.insert(projectSkillSources).values({ companyId, projectId: project.id, sourceId: source.id, repositoryUrl: source.repositoryUrl, trackingRef: "HEAD" }).returning();
+    await db.insert(agents).values(Array.from({ length: 250 }, () => ({ companyId, name: randomUUID(), adapterType: "paperclip_runner", adapterConfig: { paperclipSkillSync: { desiredSkills: ["unrelated"] } } })));
     const before = (await events()).length;
     await db.update(projectSkillSources).set({ nextSyncAt: new Date(), failureCount: 1 }).where(eq(projectSkillSources.id, binding.id));
     expect(await events()).toHaveLength(before);
@@ -97,6 +99,13 @@ describeDatabase("skill runtime invalidation", () => {
     expect(await events()).toHaveLength(before + 2);
     await db.update(projects).set({ visibility: "open" }).where(eq(projects.id, project.id));
     expect(await events()).toHaveLength(before + 3);
+    expect((await events()).slice(before).map(row => row.resourceId)).toEqual([assigned.id, assigned.id, assigned.id]);
+    const [unrelatedProject] = await db.insert(projects).values({ companyId, name: "Unrelated", visibility: "private" }).returning();
+    await db.insert(projectAccessMembers).values({ companyId, projectId: unrelatedProject.id, subjectType: "agent", subjectId: assigned.id });
+    await db.update(projects).set({ visibility: "open" }).where(eq(projects.id, unrelatedProject.id));
+    expect(await events()).toHaveLength(before + 3);
+    await db.update(projectSkillSources).set({ sourceId: null }).where(eq(projectSkillSources.id, binding.id));
+    expect((await events()).slice(before + 3)).toEqual([expect.objectContaining({ resourceId: assigned.id })]);
   });
   it("keeps publication and invalidation in the same transaction", async () => {
     await agent(); const before = await events();

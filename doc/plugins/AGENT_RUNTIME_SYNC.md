@@ -61,8 +61,9 @@ Migration 0348 invalidates referencing agents when installed skill content,
 companion files, versions, source bindings, or identities change. Rename checks
 both old and new keys. String selections, structured selections, and supported
 legacy aliases are recognized. Unrelated agents and other companies receive no
-content invalidation. Policy and private-source access changes conservatively
-invalidate the company because inherited access can affect multiple agents.
+content invalidation. Private-source bindings, membership, and privacy changes
+invalidate only agents assigned skills from the affected sources. Company policy
+changes conservatively invalidate the company.
 Source retry/lease bookkeeping and skill popularity counters do not emit changes.
 
 Assignment edits already use the configuration boundary. The runtime reader
