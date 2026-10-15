@@ -3,7 +3,7 @@ import { agents, plugins, pluginCompanySettings, resourceLifecycleEvents, type D
 import type { PluginAgentRuntimeState } from "@paperclipai/plugin-sdk";
 import { agentRecordQueries } from "../lib/agent-records.js";
 import { forbidden } from "../errors.js";
-import { deriveBundleState } from "./agent-instructions.js";
+import { agentInstructionsService } from "./agent-instructions.js";
 import { agentInstanceSecretService } from "./agent-instance-secrets.js";
 
 export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyId: string, agentId: string): Promise<PluginAgentRuntimeState | null> {
@@ -20,7 +20,7 @@ export async function pluginAgentRuntimeState(db: Db, pluginId: string, companyI
     const [latest] = await tx.select({ id: resourceLifecycleEvents.id }).from(resourceLifecycleEvents)
       .where(and(eq(resourceLifecycleEvents.companyId, companyId), eq(resourceLifecycleEvents.resourceType, "agent_runtime"), eq(resourceLifecycleEvents.resourceId, agentId)))
       .orderBy(desc(resourceLifecycleEvents.id)).limit(1);
-    const instructions = deriveBundleState(agent);
+    const instructions = await agentInstructionsService().getBundle(agent);
     return {
       revision: String(latest?.id ?? 0), agent: agentRecordQueries(tx as unknown as Db).normalizeAgentRow(agent) as PluginAgentRuntimeState["agent"],
       instructionsRootPath: instructions.rootPath, instructionsEntryFile: instructions.entryFile,

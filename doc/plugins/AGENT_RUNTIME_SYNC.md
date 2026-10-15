@@ -4,6 +4,8 @@ Plugins can opt into committed agent runtime changes with
 `resourceLifecycle: ["agent_runtime"]` and `events.subscribe`.
 Implement `onResourceLifecycle` and handle `update` and `delete`.
 Existing agent and project subscriptions do not receive this new resource type.
+Manual inbox reads retain both legacy streams regardless of automatic subscriptions.
+They include runtime events only when the manifest opts into `agent_runtime`.
 
 An event contains company identity, agent identity in `resourceId`, a numeric
 sequence serialized as `id`, and its action. It contains no file contents,
@@ -36,7 +38,8 @@ A plugin that also has `agents.lifecycle.manage` can call
 Only the enabled, ready plugin selected in that agent's required lifecycle set
 can read these inputs. The result supplies the latest runtime revision, the
 normalized agent configuration, instruction root and entry filename, and that
-plugin's own instance secrets. A missing or cross-company agent returns null.
+plugin's own instance secrets. Instruction paths use the same managed-folder
+recovery as the instruction reader. A missing or cross-company agent returns null.
 The instruction root identifies host files that the trusted worker can package
 through its existing filesystem access. This API grants no arbitrary path reads.
 Never expose instance secrets through UI data, logs, plugin state, or agent files.

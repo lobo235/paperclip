@@ -475,6 +475,18 @@ describePostgres("Resource lifecycle events", () => {
     expect(await inbox.list(companyId)).toEqual([expect.objectContaining({ action: "create" })]);
   });
 
+  it.each([{ resourceLifecycle: ["project"] }, { resourceLifecycle: ["agent_runtime"] }] as const)("preserves legacy manual streams with automatic subscription %j", async ({ resourceLifecycle }) => {
+    const plugin = await createPlugin();
+    await createAgent();
+    await db.insert(resourceLifecycleEvents).values({ companyId, resourceType: "project", resourceId: randomUUID(), action: "create" });
+    const services = buildHostServices(db, plugin.id, plugin.pluginKey, createPluginEventBus(), undefined, { manifest: { resourceLifecycle } as never });
+    const handlers = createHostClientHandlers({ pluginId: plugin.id, capabilities: ["events.subscribe"], services });
+    try {
+      const rows = await handlers["events.listLifecycle"]({ companyId }, { invocationScope: { companyId } });
+      expect(new Set(rows.map(row => row.resourceType))).toEqual(new Set(resourceLifecycle[0] === "agent_runtime" ? ["agent", "project", "agent_runtime"] : ["agent", "project"]));
+    } finally { services.dispose(); }
+  });
+
   it("enforces capability, invocation company, plugin availability, and company boundaries through host RPC", async () => {
     const plugin = await createPlugin();
     await createAgent();

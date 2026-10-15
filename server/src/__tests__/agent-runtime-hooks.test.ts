@@ -12,6 +12,7 @@ import { pluginAgentRuntimeState } from "../services/plugin-agent-runtime-state.
 import { pluginLifecycleInbox } from "../services/plugin-lifecycle-inbox.js";
 import { registerPluginLifecycleDelivery } from "../services/plugin-lifecycle-delivery.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 import { agentFileStore } from "../services/agent-file-store.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -94,6 +95,16 @@ describeDatabase("agent runtime synchronization hooks", () => {
     await expect(inbox.acknowledge(companyId, String(rows[1].id))).rejects.toMatchObject({ status: 409 });
     await inbox.acknowledge(companyId, first.id);
     expect(await inbox.list(companyId, 100, undefined, ["agent_runtime"])).toEqual([expect.objectContaining({ id: String(rows[1].id) })]);
+  });
+
+  it.each([{}, { instructionsBundleMode: "managed", instructionsRootPath: "/missing/previous-home" }])("recovers effective managed instruction paths from disk for %j", async adapterConfig => {
+    const [agent] = await db.update(agents).set({ adapterConfig }).where(eq(agents.id, agentId)).returning();
+    const root = resolveManagedInstructionsRoot(agent);
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "GUIDE.md"), "restored instructions");
+    const state = await pluginAgentRuntimeState(db, pluginId, companyId, agentId);
+    expect(state).toMatchObject({ instructionsRootPath: root, instructionsEntryFile: "GUIDE.md" });
+    expect(await fs.readFile(path.join(state!.instructionsRootPath!, state!.instructionsEntryFile), "utf8")).toBe("restored instructions");
   });
 
   it("scopes runtime inputs to the enabled owning plugin and returns the current revision", async () => {

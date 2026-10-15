@@ -1699,7 +1699,7 @@ export function buildHostServices(
 
     events: {
       async listLifecycle(params) {
-        return lifecycleInbox.list(ensureCompanyId(params.companyId), params.limit, params.afterId, options.manifest?.resourceLifecycle);
+        return lifecycleInbox.list(ensureCompanyId(params.companyId), params.limit, params.afterId, options.manifest?.resourceLifecycle?.includes("agent_runtime") ? ["agent", "project", "agent_runtime"] : ["agent", "project"]);
       },
       async acknowledgeLifecycle(params) {
         await lifecycleInbox.acknowledge(ensureCompanyId(params.companyId), params.eventId);
