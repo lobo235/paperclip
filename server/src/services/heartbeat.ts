@@ -2489,7 +2489,7 @@ export function heartbeatService(
       const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
       const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
       if (agent.adapterType === "paperclip_runner") {
-        const homeConfig = bindHeartbeatRunnerHomeMode({ ...config, ...issueAssigneeOverrides?.adapterConfig }, savedRouterInput);
+        const homeConfig = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
         if ("homeMode" in homeConfig) config = { ...config, homeMode: homeConfig.homeMode };
       }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;

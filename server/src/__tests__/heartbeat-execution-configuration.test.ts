@@ -133,6 +133,7 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     { saved: "isolated", managed: true, failure: "saved managed login required" },
     { saved: "isolated", managed: false, failure: "saved isolated skills required" },
     { saved: "preconfigured", managed: true, failure: null },
+    { saved: null, managed: true, failure: "saved managed login required" },
   ] as const)("retains $saved preparation after configuration changes (managed: $managed)", async ({ saved, managed, failure }) => {
     const f = await seed(managed);
     const [agent] = await db.update(agents).set({ adapterType: "paperclip_runner", adapterConfig: {
@@ -144,14 +145,14 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     const prepare = vi.spyOn(aiRuntime, "prepareManagedAiRuntime").mockRejectedValue(new Error("saved managed login required"));
     skillFailures.set(f.companyId, "saved isolated skills required");
     // Preparation only reads the persisted mode and whether recovery is active.
-    const persisted = { schema: saved === "isolated" ? "paperclip.native-execution-input.v5" : "paperclip.native-execution-input.v7",
+    const persisted = saved === null ? null : { schema: saved === "isolated" ? "paperclip.native-execution-input.v5" : "paperclip.native-execution-input.v7",
       ...(saved === "preconfigured" ? { homeMode: saved } : {}),
     } as unknown as HeartbeatExecutionConfigurationInput["environment"]["persistedNativeExecutionInput"];
     const opening = prepareHeartbeatExecutionConfiguration(db, {
       run, agent, task: { issueId: f.issueId, context: {}, responsibleUserId: f.userId,
         acceptedPlanContinuationWake: false, acceptedPlanWakeRoutingDecision: null, taskProjectContext: null,
         routineEnvContext: { routineId: null, env: null, responsibleUserId: null } },
-      config: { sourceWorkspaceConfig: agent.adapterConfig, aiBinding: managed
+      config: { sourceWorkspaceConfig: { ...agent.adapterConfig, homeMode: "preconfigured" }, aiBinding: managed
         ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig!.aiConnection) : undefined },
       policy: { trustPreset: { kind: "standard", preset: "standard", boundary: null, sourcePresets: {} },
         useIsolatedTaskDirectory: false, explicitTaskDirectory: false },
@@ -168,19 +169,18 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     if (managed && saved === "isolated") expect(prepare).toHaveBeenCalledOnce();
   });
 
-  it.each(["agent", "task"] as const)("dispatches %s preconfigured Runner preparation without acquiring managed auth or materializing assigned skills", async source => {
+  it.each(["agent", "stored task override"] as const)("uses operator preconfigured mode despite %s configuration", async source => {
     const f = await seed(true);
     const nativeHome = await mkdtemp(path.join(tmpdir(), "paperclip-preconfigured-preparation-"));
     const workspace = path.join(nativeHome, "workspace");
     await mkdir(workspace);
     process.env.PAPERCLIP_HOME = nativeHome;
     await db.update(agents).set({ adapterType: "paperclip_runner", adapterConfig: {
-      provider: "codex", model: "gpt-6.1-sol", homeMode: source === "agent" ? "preconfigured" : "isolated", cwd: workspace,
+      provider: "codex", model: "gpt-6.1-sol", homeMode: "preconfigured", cwd: workspace,
     } }).where(eq(agents.id, f.agentId));
-    if (source === "task") {
-      await db.update(issues).set({ assigneeAdapterOverrides: { adapterConfig: { homeMode: "preconfigured" } } }).where(eq(issues.id, f.issueId));
-      // A task override must take effect before even parsing/router-selecting
-      // an unrelated managed account, not just before credential preparation.
+    if (source === "stored task override") {
+      await db.update(issues).set({ assigneeAdapterOverrides: { adapterConfig: { homeMode: "isolated" } } }).where(eq(issues.id, f.issueId));
+      // Old task data cannot change the operator's mode before AI routing.
       await db.update(agents).set({ runtimeConfig: { aiConnection: { mode: "router", connectionId: "unconfigured-pool" } } }).where(eq(agents.id, f.agentId));
     }
     skillFailures.set(f.companyId, "Preconfigured mode must not resolve assigned skills");

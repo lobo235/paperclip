@@ -750,7 +750,9 @@ complete. A separator split between reads does not count against the frame limit
 Set `homeMode: "preconfigured"` in a `paperclip_runner` agent's adapter config
 (or the runnerd transport options) to use the execution account's existing home.
 The default is `"isolated"`. The initial supported providers are native Codex
-and ACPX Claude/Codex. Other providers reject this option. The internal ACPX task bridge uses a stable
+and ACPX Claude/Codex. An operator must select this mode on the agent/Runner
+configuration. Task-level overrides are rejected, and agent credentials cannot
+set or inherit this option. Other providers reject this option. The internal ACPX task bridge uses a stable
 session name so an existing user MCP server named `paperclip` remains available.
 
 Prepare authentication, skills, and external MCP servers on the execution machine

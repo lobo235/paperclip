@@ -87,7 +87,8 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   const { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext } = input.task;
   const { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput } = input.environment;
   const sourceWorkspaceConfig = agent.adapterType === "paperclip_runner"
-    ? bindHeartbeatRunnerHomeMode(input.config.sourceWorkspaceConfig, persistedNativeExecutionInput)
+    ? { ...input.config.sourceWorkspaceConfig,
+        homeMode: bindHeartbeatRunnerHomeMode(parseObject(agent.adapterConfig), persistedNativeExecutionInput).homeMode }
     : input.config.sourceWorkspaceConfig;
   const preconfiguredHome = agent.adapterType === "paperclip_runner" && sourceWorkspaceConfig.homeMode === "preconfigured";
   const aiBinding = preconfiguredHome ? undefined : input.config.aiBinding;
