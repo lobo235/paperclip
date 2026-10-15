@@ -59,6 +59,18 @@ describeDatabase("skill runtime invalidation", () => {
     await db.update(companySkills).set({ starCount: 9, updatedAt: new Date() }).where(eq(companySkills.id, skillId));
     expect(await events()).toHaveLength(after);
   });
+  it.each(["paperclip", "complain", "suggestion-box"])("invalidates implicit legacy %s skills with an empty selection", async slug => {
+    const legacy = await agent([]);
+    const native = await agent([]);
+    await db.update(agents).set({ adapterType: "process" }).where(eq(agents.id, legacy.id));
+    const [skill] = await db.insert(companySkills).values({ companyId, key: `paperclipai/paperclip/${slug}`, slug, name: slug, markdown: "implicit" }).returning();
+    const before = (await events()).length;
+    await db.update(companySkills).set({ markdown: "changed implicit" }).where(eq(companySkills.id, skill.id));
+    expect((await events()).slice(before)).toEqual([expect.objectContaining({ resourceId: legacy.id })]);
+    await db.delete(companySkills).where(eq(companySkills.id, skill.id));
+    expect((await events()).slice(before).map(row => row.resourceId)).toEqual([legacy.id, legacy.id]);
+    expect((await events()).slice(before).some(row => row.resourceId === native.id)).toBe(false);
+  });
   it("captures companion-file changes, rename, and deletion using both old and new references", async () => {
     const old = await agent(); const next = await agent([`${key}-next`]);
     const before = (await events()).length;

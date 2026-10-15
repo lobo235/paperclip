@@ -53,7 +53,7 @@ BEGIN
   ) refs WHERE reference IS NOT NULL;
   FOR candidate IN SELECT a.id FROM agents a WHERE a.company_id = company
     AND a.status NOT IN ('pending_approval', 'terminated') AND (
-      (a.adapter_type <> 'paperclip_runner' AND 'paperclipai/paperclip/paperclip' = ANY(keys)) OR
+      (a.adapter_type <> 'paperclip_runner' AND keys && ARRAY['paperclipai/paperclip/paperclip', 'paperclipai/paperclip/complain', 'paperclipai/paperclip/suggestion-box']) OR
       EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.adapter_config#>'{paperclipSkillSync,desiredSkills}') = 'array'
         THEN a.adapter_config#>'{paperclipSkillSync,desiredSkills}' ELSE '[]'::jsonb END) choice
         WHERE lower(trim(CASE WHEN jsonb_typeof(choice) = 'string' THEN choice#>>'{}' ELSE choice->>'key' END)) = ANY(keys)))
