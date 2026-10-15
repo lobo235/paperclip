@@ -27,6 +27,7 @@ describePostgres("durable plugin lifecycle delivery", () => {
   afterAll(async () => { await database?.cleanup(); });
   afterEach(() => { vi.restoreAllMocks(); });
   beforeEach(async () => {
+    vi.spyOn(db.$client, "listen").mockResolvedValue({ unlisten: vi.fn(), state: {} } as never);
     await db.delete(plugins);
     companyId = randomUUID(); pluginId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Delivery fixture", issuePrefix: `L${companyId.slice(0, 6)}` });

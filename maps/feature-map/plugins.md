@@ -51,6 +51,9 @@ Manual: Open the contributed page by navigation and cold deep link, perform a ha
   reload is not a lifecycle action in the plugin manager.
 
 - Installing a plugin does not authorize every host capability or external action.
+- Runtime synchronization is opt-in and uses durable resource delivery. See
+  [the contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md) and
+  [database regressions](../../server/src/__tests__/agent-runtime-hooks.test.ts).
 - Plugin-provided routes are dynamic; this map covers the host lifecycle, not every third-party feature.
 - Environment-driver plugins also need the [environment](./execution-environments.md) checks.
 

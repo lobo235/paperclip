@@ -1,3 +1,4 @@
+import type { PluginAgentRuntimeState } from "./types.js";
 import type { AgentLifecycleRequest, AgentLifecycleResult } from "@paperclipai/shared";
 import type { AiConnectionRouterRequest, AiConnectionRouterResult } from "@paperclipai/shared";
 /**
@@ -2112,6 +2113,10 @@ export interface WorkerToHostMethods {
   "agents.list": [
     params: { companyId: string; status?: string; limit?: number; offset?: number },
     result: Agent[],
+  ];
+  "agents.getRuntime": [
+    params: { agentId: string; companyId: string },
+    result: PluginAgentRuntimeState | null,
   ];
   "agents.get": [
     params: { agentId: string; companyId: string },

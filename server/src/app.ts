@@ -1265,6 +1265,7 @@ export async function createApp(
   });
   app.locals.deliveryWork = deliveryWork;
   const resourceLifecycleDelivery = registerPluginLifecycleDelivery(deliveryWork, db, workerManager, lifecycle);
+  await resourceLifecycleDelivery.ready;
   if (opts.feedbackExportService) {
     deliveryWork.register(DELIVERY_QUEUES.feedback, {
       retryMs: FEEDBACK_EXPORT_FLUSH_INTERVAL_MS,

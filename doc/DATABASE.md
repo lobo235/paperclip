@@ -950,3 +950,16 @@ This disposable fixture compares the real ownership, recovery-action and status
 delivery queries, including complete positional results and database plans.
 All data is synthetic. Query timings exclude process liveness probes, HTTP and
 provider work.
+
+### Agent runtime synchronization journal
+
+Migration 0347 adds the opt-in `agent_runtime` resource stream. Database triggers
+record content-free configuration invalidations and managed file audit events in
+`resource_lifecycle_events`. They share the mutation transaction and fail the
+mutation if journal insertion fails. An INSERT trigger sends an empty PostgreSQL
+notification on `paperclip_plugin_lifecycle` after commit. The host subscribes
+only when a ready runtime subscriber is installed. This feature requires a
+session-compatible database connection; do not enable it through a transaction
+pooler. Reconnection scans the durable journal. Existing process-local work
+signals continue to serve other delivery queues. See
+[the plugin contract](plugins/AGENT_RUNTIME_SYNC.md).

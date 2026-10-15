@@ -1,7 +1,7 @@
 import { createAgentLifecycle, configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { agentApiKeys, agents, budgetPolicies, companies, costEvents, createDb, pluginCompanySettings, pluginLifecycleAcknowledgments, plugins, projects, resourceLifecycleEvents, type Db } from "@paperclipai/db";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -40,7 +40,7 @@ describePostgres("Resource lifecycle events", () => {
   });
   afterEach(() => { vi.unstubAllEnvs(); });
 
-  const events = () => db.select().from(resourceLifecycleEvents).where(eq(resourceLifecycleEvents.companyId, companyId));
+  const events = () => db.select().from(resourceLifecycleEvents).where(and(eq(resourceLifecycleEvents.companyId, companyId), ne(resourceLifecycleEvents.resourceType, "agent_runtime")));
   const createAgent = async (status: "idle" | "pending_approval" | "terminated" = "idle", database: Db = db) => {
     const agent = await createAgentLifecycle(database).requestHire(companyId, { name: "Lifecycle agent", adapterType: "process", adapterConfig: {}, status });
     await worker.process(agent.id);

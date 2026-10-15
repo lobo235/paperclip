@@ -270,6 +270,7 @@ export type {
   PluginIssueSubtree,
   PluginIssueSummariesClient,
   PluginAgentsClient,
+  PluginAgentRuntimeState,
   PluginAccessClient,
   PluginAccessMembersClient,
   PluginAccessInvitesClient,

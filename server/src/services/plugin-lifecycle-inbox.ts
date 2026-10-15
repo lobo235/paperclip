@@ -36,7 +36,7 @@ export function pluginLifecycleInbox(db: Db, pluginId: string) {
       if (afterId !== undefined && (typeof afterId !== "string" || !/^[1-9]\d*$/.test(afterId) || !Number.isSafeInteger(Number(afterId)))) throw badRequest("Invalid lifecycle page id");
       await assertAvailable(db, companyId);
       const rows = await db.select().from(resourceLifecycleEvents)
-        .where(and(eq(resourceLifecycleEvents.companyId, companyId), unacknowledged, firstForResource, resourceTypes ? inArray(resourceLifecycleEvents.resourceType, resourceTypes) : undefined, afterId === undefined ? undefined : gt(resourceLifecycleEvents.id, Number(afterId))))
+        .where(and(eq(resourceLifecycleEvents.companyId, companyId), unacknowledged, firstForResource, inArray(resourceLifecycleEvents.resourceType, resourceTypes ?? ["agent", "project"]), afterId === undefined ? undefined : gt(resourceLifecycleEvents.id, Number(afterId))))
         .orderBy(asc(resourceLifecycleEvents.id)).limit(limit);
       return rows.map(row => ({ ...row, id: String(row.id), createdAt: row.createdAt.toISOString() })) as ResourceLifecycleEvent[];
     },

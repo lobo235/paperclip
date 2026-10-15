@@ -56,6 +56,14 @@ own policy and access review.
 Gaps: Company-scoped configuration value does not turn the instance management route
 into an agent route.
 
+Runtime synchronization is a host-to-plugin contract. An opt-in `agent_runtime`
+subscriber receives committed changes through `onResourceLifecycle`. The runtime
+reader requires `agents.lifecycle.manage`, the invocation company, and selection
+as that agent's owning lifecycle plugin. Disabled and unrelated plugins cannot
+read its instance secrets. See [contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md)
+and [database regressions](../../server/src/__tests__/agent-runtime-hooks.test.ts).
+This does not add an ordinary agent API.
+
 ## `contributions`
 
 Review: `baseline`.

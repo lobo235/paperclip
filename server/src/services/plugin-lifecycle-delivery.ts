@@ -19,6 +19,7 @@ export function registerPluginLifecycleDelivery(
   // Startup and every wake remain pending until an admitted run inspects the inbox.
   // The coordinator may reconcile signals while idle drain prevents dispatch.
   let pending = true;
+  let disposed = false;
   const retryAt = new Map<string, number>();
   const retryMs = 30_000;
   const delivery = coordinator.register(DELIVERY_QUEUES.pluginLifecycle, {
@@ -104,19 +105,36 @@ export function registerPluginLifecycleDelivery(
       }
     },
   });
-  function wake() { pending = true; delivery.wake(); }
-  const unsubscribeConfig = manager.onConfigApplied(wake);
-  lifecycle.on("plugin.loaded", wake);
-  lifecycle.on("plugin.enabled", wake);
-  lifecycle.on("plugin.worker_started", wake);
+  function wake() { if (disposed) return; pending = true; delivery.wake(); }
+  let listening: ReturnType<Db["$client"]["listen"]> | undefined;
+  async function ensureListening() {
+    if (disposed || !db.$client?.listen) return;
+    const installed = await db.select({ manifest: plugins.manifestJson }).from(plugins).where(eq(plugins.status, "ready"));
+    if (!disposed && installed.some(plugin => plugin.manifest.resourceLifecycle?.includes("agent_runtime"))) {
+      listening ??= db.$client.listen("paperclip_plugin_lifecycle", wake, wake);
+      return listening;
+    }
+  }
+  function pluginChanged() {
+    wake();
+    void ensureListening().catch(() => logger.warn("Plugin lifecycle database listener unavailable"));
+  }
+  const listenerReady = ensureListening();
+  const unsubscribeConfig = manager.onConfigApplied(pluginChanged);
+  lifecycle.on("plugin.loaded", pluginChanged);
+  lifecycle.on("plugin.enabled", pluginChanged);
+  lifecycle.on("plugin.worker_started", pluginChanged);
   return {
     ...delivery,
+    ready: Promise.all([delivery.ready, listenerReady]),
     wake,
     dispose() {
+      disposed = true;
+      void listening?.then(subscription => subscription.unlisten()).catch(() => {});
       unsubscribeConfig();
-      lifecycle.off("plugin.loaded", wake);
-      lifecycle.off("plugin.enabled", wake);
-      lifecycle.off("plugin.worker_started", wake);
+      lifecycle.off("plugin.loaded", pluginChanged);
+      lifecycle.off("plugin.enabled", pluginChanged);
+      lifecycle.off("plugin.worker_started", pluginChanged);
     },
   };
 }
