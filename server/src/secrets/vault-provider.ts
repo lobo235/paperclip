@@ -70,7 +70,7 @@ export interface VaultProviderConfig {
   kvMount: string;
   kvPathPrefix: string;
   auth: {
-    method: "kubernetes" | "token";
+    method: "kubernetes" | "token" | "approle";
     role: string | null;
     saTokenPath: string;
   };
@@ -249,14 +249,14 @@ function validateNamespace(raw: unknown, warnings: string[]): string | null {
 function validateAuthBlock(
   raw: unknown,
   warnings: string[],
-): { method: "kubernetes" | "token"; role: string | null; saTokenPath: string } | null {
+): { method: "kubernetes" | "token" | "approle"; role: string | null; saTokenPath: string } | null {
   const block = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const methodRaw = asString(block.method);
-  if (methodRaw && methodRaw !== "kubernetes" && methodRaw !== "token") {
-    warnings.push(`auth.method must be 'kubernetes' or 'token'; got ${methodRaw}`);
+  if (methodRaw && methodRaw !== "kubernetes" && methodRaw !== "token" && methodRaw !== "approle") {
+    warnings.push(`auth.method must be 'kubernetes', 'token', or 'approle'; got ${methodRaw}`);
     return null;
   }
-  const method = (methodRaw ?? "token") as "kubernetes" | "token";
+  const method = (methodRaw ?? "token") as "kubernetes" | "token" | "approle";
   const role = asString(block.role);
   if (method === "kubernetes") {
     if (!role) {

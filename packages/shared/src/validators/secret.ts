@@ -314,7 +314,7 @@ export const vaultProviderConfigSchema = z
     versionRetention: z.number().int().min(2).max(100).optional().nullable(),
     auth: z
       .object({
-        method: z.enum(["token", "kubernetes"]),
+        method: z.enum(["token", "kubernetes", "approle"]),
         role: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional().nullable(),
         saTokenPath: z.string().trim().min(1).max(512).optional().nullable(),
       })

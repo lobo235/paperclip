@@ -266,6 +266,18 @@ describe("resolveVaultConfig", () => {
     expect(r.config?.auth.role).toBe("paperclip-server");
   });
 
+  it("resolves auth.method=approle from env without requiring a role", () => {
+    const r = resolveVaultConfig({
+      env: {
+        PAPERCLIP_SECRETS_VAULT_ADDR: "https://vault.env:8200",
+        PAPERCLIP_SECRETS_VAULT_AUTH_METHOD: "approle",
+      },
+      providerConfig: null,
+    });
+    expect(r.config?.auth.method).toBe("approle");
+    expect(r.config?.auth.role).toBeNull();
+  });
+
   it("operator env address wins over a per-vault config address, warning on the redirect", () => {
     const r = resolveVaultConfig({
       env: { PAPERCLIP_SECRETS_VAULT_ADDR: "https://from-env:8200" },
@@ -701,6 +713,73 @@ describe("detectVaultAuthSource", () => {
       expect(r.tokenPath).toBe("/run/vault/token");
     }
   });
+
+  it("returns approle mode when role_id and secret_id env are set", () => {
+    const r = detectVaultAuthSource({
+      config: {
+        address: "https://v",
+        namespace: null,
+        kvMount: "secret",
+        kvPathPrefix: "paperclip",
+        auth: { method: "approle", role: null, saTokenPath: "/dev/null" },
+        versionRetention: 10,
+      },
+      env: {
+        PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID: "role-123",
+        PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID: "secret-456",
+      },
+      readSaToken: () => null,
+    });
+    expect(r.mode).toBe("approle");
+    if (r.mode === "approle") {
+      expect(r.roleId).toBe("role-123");
+      expect(r.secretId).toBe("secret-456");
+      expect(r.roleIdPath).toBeUndefined();
+      expect(r.secretIdPath).toBeUndefined();
+    }
+  });
+
+  it("returns approle mode with file paths when only *_FILE env are set", () => {
+    const r = detectVaultAuthSource({
+      config: {
+        address: "https://v",
+        namespace: null,
+        kvMount: "secret",
+        kvPathPrefix: "paperclip",
+        auth: { method: "approle", role: null, saTokenPath: "/dev/null" },
+        versionRetention: 10,
+      },
+      env: {
+        PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID_FILE: "/run/vault/role-id",
+        PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID_FILE: "/run/vault/secret-id",
+      },
+      readSaToken: () => null,
+    });
+    expect(r.mode).toBe("approle");
+    if (r.mode === "approle") {
+      expect(r.roleId).toBe("");
+      expect(r.secretId).toBe("");
+      expect(r.roleIdPath).toBe("/run/vault/role-id");
+      expect(r.secretIdPath).toBe("/run/vault/secret-id");
+    }
+  });
+
+  it("returns error when approle role_id or secret_id is missing", () => {
+    const r = detectVaultAuthSource({
+      config: {
+        address: "https://v",
+        namespace: null,
+        kvMount: "secret",
+        kvPathPrefix: "paperclip",
+        auth: { method: "approle", role: null, saTokenPath: "/dev/null" },
+        versionRetention: 10,
+      },
+      env: { PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID: "role-123" },
+      readSaToken: () => null,
+    });
+    expect(r.mode).toBe("error");
+    if (r.mode === "error") expect(r.message).toMatch(/approle/i);
+  });
 });
 
 describe("buildManagedKvPath", () => {
@@ -825,6 +904,11 @@ describe("VaultTokenManager", () => {
         leaseDurationSec: 100,
         renewable: true,
       })),
+      loginApprole: vi.fn(async () => ({
+        clientToken: "hvs.approle.1",
+        leaseDurationSec: 100,
+        renewable: true,
+      })),
       renewSelf: vi.fn(async () => ({ leaseDurationSec: 100, renewable: true })),
     };
   }
@@ -838,6 +922,69 @@ describe("VaultTokenManager", () => {
     });
     expect(await tm.acquire()).toBe("hvs.kube.1");
     expect(gw.loginKubernetes).toHaveBeenCalledTimes(1);
+  });
+
+  it("performs initial login on first acquire (approle mode)", async () => {
+    const gw = fakeGateway();
+    const tm = new VaultTokenManager({
+      source: { mode: "approle", roleId: "role-1", secretId: "secret-1" },
+      gateway: gw as never,
+      now: () => 0,
+    });
+    expect(await tm.acquire()).toBe("hvs.approle.1");
+    expect(gw.loginApprole).toHaveBeenCalledTimes(1);
+    expect(gw.loginApprole.mock.calls[0][0]).toMatchObject({ roleId: "role-1", secretId: "secret-1" });
+  });
+
+  it("renews an approle token proactively past the 70% TTL threshold", async () => {
+    const gw = fakeGateway();
+    let t = 0;
+    const tm = new VaultTokenManager({
+      source: { mode: "approle", roleId: "role-1", secretId: "secret-1" },
+      gateway: gw as never,
+      now: () => t,
+    });
+    await tm.acquire();
+    t = 71_000;
+    await tm.acquire();
+    expect(gw.renewSelf).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads approle role_id/secret_id files on each login (in-place rotation)", async () => {
+    const gw = fakeGateway();
+    gw.loginApprole
+      .mockResolvedValueOnce({ clientToken: "hvs.approle.1", leaseDurationSec: 100, renewable: false })
+      .mockResolvedValueOnce({ clientToken: "hvs.approle.2", leaseDurationSec: 100, renewable: false });
+
+    const files: Record<string, string | null> = {
+      "/run/vault/role-id": "role-original",
+      "/run/vault/secret-id": "secret-original",
+    };
+    const readSaToken = vi.fn((path: string) => files[path] ?? null);
+
+    let t = 0;
+    const tm = new VaultTokenManager({
+      source: {
+        mode: "approle",
+        roleId: "role-stale",
+        secretId: "secret-stale",
+        roleIdPath: "/run/vault/role-id",
+        secretIdPath: "/run/vault/secret-id",
+      },
+      gateway: gw as never,
+      now: () => t,
+      readSaToken,
+    });
+
+    await tm.acquire();
+    files["/run/vault/role-id"] = "role-rotated";
+    files["/run/vault/secret-id"] = "secret-rotated";
+    t = 200_000; // force a re-login
+    await tm.acquire();
+
+    expect(gw.loginApprole).toHaveBeenCalledTimes(2);
+    expect(gw.loginApprole.mock.calls[0][0]).toMatchObject({ roleId: "role-original", secretId: "secret-original" });
+    expect(gw.loginApprole.mock.calls[1][0]).toMatchObject({ roleId: "role-rotated", secretId: "secret-rotated" });
   });
 
   it("returns the static token in token mode without calling the gateway", async () => {
@@ -1032,6 +1179,7 @@ function fakeVaultGateway(): {
     impl: {
       health: async () => ({ initialized: true, sealed: false, standby: false, version: "1.0.0" }),
       loginKubernetes: async () => ({ clientToken: "hvs.kube", leaseDurationSec: 3600, renewable: true }),
+      loginApprole: async () => ({ clientToken: "hvs.approle", leaseDurationSec: 3600, renewable: true }),
       renewSelf: async () => ({ leaseDurationSec: 3600, renewable: true }),
       lookupSelf: async () => ({ leaseDurationSec: 3600, renewable: true, policies: ["default", "paperclip-default"] }),
       capabilitiesSelf: async (paths) => Object.fromEntries(paths.map((p) => [p, ["create", "read", "update", "delete"]])),
@@ -1303,6 +1451,30 @@ describe("withVaultTokenRetry", () => {
     const r = await withVaultTokenRetry({
       tokenManager: tm,
       sourceMode: "kubernetes",
+      operation: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new SecretProviderClientError({
+            code: "access_denied",
+            provider: "vault",
+            operation: "kvRead",
+            message: "permission denied",
+          });
+        }
+        return "ok";
+      },
+    });
+    expect(r).toBe("ok");
+    expect(tm.invalidate).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(2);
+  });
+
+  it("retries once on 403 in approle mode", async () => {
+    const tm = tokenMgr({ mode: "approle", roleId: "r", secretId: "s" });
+    let calls = 0;
+    const r = await withVaultTokenRetry({
+      tokenManager: tm,
+      sourceMode: "approle",
       operation: async () => {
         calls += 1;
         if (calls === 1) {

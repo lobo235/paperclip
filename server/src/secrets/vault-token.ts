@@ -49,6 +49,11 @@ export interface VaultHttpGateway {
     leaseDurationSec: number;
     renewable: boolean;
   }>;
+  loginApprole(input: { roleId: string; secretId: string }): Promise<{
+    clientToken: string;
+    leaseDurationSec: number;
+    renewable: boolean;
+  }>;
   /**
    * Renew the supplied token in-place. Takes the token as a parameter
    * rather than reaching back through getToken() because this method is
@@ -183,6 +188,19 @@ export class HttpVaultGateway implements VaultHttpGateway {
       renewable: r.auth.renewable,
     };
   }
+  async loginApprole(input: { roleId: string; secretId: string }) {
+    const r = await this.call<{ auth: { client_token: string; lease_duration: number; renewable: boolean } }>({
+      method: "POST",
+      path: "/v1/auth/approle/login",
+      body: { role_id: input.roleId, secret_id: input.secretId },
+      authenticated: false,
+    });
+    return {
+      clientToken: r.auth.client_token,
+      leaseDurationSec: r.auth.lease_duration,
+      renewable: r.auth.renewable,
+    };
+  }
   async renewSelf(token: string) {
     // Pass the token explicitly so call() does not invoke getToken(),
     // which would re-enter VaultTokenManager.acquire() while
@@ -268,6 +286,18 @@ export type VaultAuthSource =
       tokenPath?: string;
     }
   | { mode: "kubernetes"; role: string; jwt: string; saTokenPath: string }
+  | {
+      mode: "approle";
+      roleId: string;
+      secretId: string;
+      /**
+       * Optional paths to files holding the role_id/secret_id. When set, each
+       * value is re-read from its file on every login so an orchestrator (e.g.
+       * a Nomad Vault agent) can rotate it in place with no env change.
+       */
+      roleIdPath?: string;
+      secretIdPath?: string;
+    }
   | { mode: "error"; message: string };
 
 export function asString(value: unknown): string | null {
@@ -300,6 +330,29 @@ export function detectVaultAuthSource(input: {
     return { mode: "kubernetes", role: config.auth.role, jwt, saTokenPath: config.auth.saTokenPath };
   }
 
+  if (config.auth.method === "approle") {
+    const roleId = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID);
+    const secretId = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID);
+    const roleIdPath = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID_FILE) ?? undefined;
+    const secretIdPath = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID_FILE) ?? undefined;
+    if ((!roleId && !roleIdPath) || (!secretId && !secretIdPath)) {
+      return {
+        mode: "error",
+        message:
+          "auth.method = 'approle' requires role_id and secret_id via " +
+          "PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID and PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID " +
+          "(or the corresponding *_FILE paths)",
+      };
+    }
+    return {
+      mode: "approle",
+      roleId: roleId ?? "",
+      secretId: secretId ?? "",
+      roleIdPath,
+      secretIdPath,
+    };
+  }
+
   // method = token (explicit or defaulted). The token can come from the
   // standard VAULT_TOKEN env or, optionally, a file
   // (PAPERCLIP_SECRETS_VAULT_TOKEN_FILE) that an orchestrator can rotate in
@@ -330,7 +383,7 @@ export class VaultTokenManager {
 
   constructor(input: {
     source: VaultAuthSource;
-    gateway: Pick<VaultHttpGateway, "loginKubernetes" | "renewSelf">;
+    gateway: Pick<VaultHttpGateway, "loginKubernetes" | "loginApprole" | "renewSelf">;
     now?: () => number;
     /** Test seam: re-read the SA token file on each login. Defaults to readFileSync. */
     readSaToken?: (path: string) => string | null;
@@ -376,8 +429,8 @@ export class VaultTokenManager {
   }
 
   private async acquireInner(): Promise<string> {
-    if (this.source.mode !== "kubernetes") {
-      throw new Error("acquireInner only used in kubernetes mode");
+    if (this.source.mode !== "kubernetes" && this.source.mode !== "approle") {
+      throw new Error("acquireInner only used for kubernetes/approle login modes");
     }
     const now = this.now();
     if (this.cached) {
@@ -404,36 +457,7 @@ export class VaultTokenManager {
         }
       }
     }
-    if (this.source.mode !== "kubernetes") throw new Error("unreachable");
-    // Re-read the SA JWT from disk on every login attempt. Kubernetes
-    // projected SA tokens are rotated on disk roughly every hour; the
-    // value captured at session-creation time goes stale and the
-    // resulting login attempt fails with 403, leaving vault auth
-    // permanently broken until process restart.
-    //
-    // If the disk read fails or the file is missing, fall back to the
-    // jwt captured at session creation — the subsequent 403 (if any) will
-    // be surfaced through withVaultTokenRetry rather than silently
-    // swallowed here.
-    let jwt = this.source.jwt;
-    try {
-      const fresh = this.readSaToken(this.source.saTokenPath);
-      if (fresh) {
-        jwt = fresh;
-      }
-    } catch (error) {
-      logger.warn(
-        {
-          err: error,
-          saTokenPath: this.source.saTokenPath,
-        },
-        "vault-provider: failed to re-read SA token; falling back to cached JWT",
-      );
-    }
-    const login = await this.gateway.loginKubernetes({
-      role: this.source.role,
-      jwt,
-    });
+    const login = await this.loginFresh();
     this.cached = {
       token: login.clientToken,
       acquiredAt: now,
@@ -441,6 +465,66 @@ export class VaultTokenManager {
       renewable: login.renewable,
     };
     return this.cached.token;
+  }
+
+  /**
+   * Perform a fresh login for kubernetes or approle mode, re-reading any
+   * on-disk credential (SA JWT or role_id/secret_id files) on every attempt
+   * so an orchestrator can rotate them in place without a restart.
+   */
+  private async loginFresh(): Promise<{
+    clientToken: string;
+    leaseDurationSec: number;
+    renewable: boolean;
+  }> {
+    if (this.source.mode === "kubernetes") {
+      // Re-read the SA JWT from disk on every login attempt. Kubernetes
+      // projected SA tokens are rotated on disk roughly every hour; the
+      // value captured at session-creation time goes stale and the
+      // resulting login attempt fails with 403, leaving vault auth
+      // permanently broken until process restart.
+      //
+      // If the disk read fails or the file is missing, fall back to the
+      // jwt captured at session creation — the subsequent 403 (if any) will
+      // be surfaced through withVaultTokenRetry rather than silently
+      // swallowed here.
+      let jwt = this.source.jwt;
+      try {
+        const fresh = this.readSaToken(this.source.saTokenPath);
+        if (fresh) {
+          jwt = fresh;
+        }
+      } catch (error) {
+        logger.warn(
+          {
+            err: error,
+            saTokenPath: this.source.saTokenPath,
+          },
+          "vault-provider: failed to re-read SA token; falling back to cached JWT",
+        );
+      }
+      return this.gateway.loginKubernetes({
+        role: this.source.role,
+        jwt,
+      });
+    }
+    if (this.source.mode === "approle") {
+      // Re-read role_id/secret_id files on each login so an orchestrator
+      // (e.g. a Nomad Vault agent) can rotate them in place; fall back to
+      // the env values when a file is absent or unreadable.
+      let roleId = this.source.roleId;
+      let secretId = this.source.secretId;
+      if (this.source.roleIdPath) {
+        const fresh = this.readSaToken(this.source.roleIdPath);
+        if (fresh) roleId = fresh;
+      }
+      if (this.source.secretIdPath) {
+        const fresh = this.readSaToken(this.source.secretIdPath);
+        if (fresh) secretId = fresh;
+      }
+      return this.gateway.loginApprole({ roleId, secretId });
+    }
+    throw new Error("unreachable");
   }
 }
 
@@ -453,7 +537,7 @@ export async function withVaultTokenRetry<T>(input: {
     return await input.operation();
   } catch (error) {
     if (
-      input.sourceMode === "kubernetes" &&
+      (input.sourceMode === "kubernetes" || input.sourceMode === "approle") &&
       error instanceof SecretProviderClientError &&
       error.code === "access_denied"
     ) {
