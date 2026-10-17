@@ -375,7 +375,7 @@ export function detectVaultAuthSource(input: {
 
 export class VaultTokenManager {
   private readonly source: VaultAuthSource;
-  private readonly gateway: Pick<VaultHttpGateway, "loginKubernetes" | "renewSelf">;
+  private readonly gateway: Pick<VaultHttpGateway, "loginKubernetes" | "loginApprole" | "renewSelf">;
   private readonly now: () => number;
   private readonly readSaToken: (path: string) => string | null;
   private cached: { token: string; acquiredAt: number; ttlMs: number; renewable: boolean } | null = null;
