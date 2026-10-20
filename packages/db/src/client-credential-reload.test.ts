@@ -1,6 +1,6 @@
 import net from "node:net";
 import { describe, expect, it } from "vitest";
-import { closeRegisteredClients, createDb, reloadDatabaseCredential, type Db } from "./client.js";
+import { closeRegisteredClients, createDb, mergeDatabaseCredentialPassword, reloadDatabaseCredential, withDedicatedDbConnection, type Db } from "./client.js";
 
 /**
  * A Postgres wire peer that requires cleartext password auth, so it observes
@@ -169,4 +169,76 @@ describe("credential reload", () => {
       await closeRegisteredClients(peer.urlFor("ignored"));
     }
   }, 15000);
+
+  it("does not send a repointed file's password to the original server", async () => {
+    const peer = await startAuthCapturingPeer();
+    let sourceUrl = peer.urlFor("firstpw");
+    try {
+      const db = createDb(sourceUrl, { credentialSource: () => sourceUrl });
+      await run(db);
+      expect(peer.passwords()).toEqual(["firstpw"]);
+
+      // Repoint the file to a different database on the same server. The pool
+      // is not reset (target changed), but a brand-new connection (dedicated)
+      // now reads the repointed file. Its password must not be disclosed to the
+      // original server — an empty password is sent instead.
+      sourceUrl = peer.urlFor("secondpw", "otherdb");
+      await withDedicatedDbConnection(db, (dedicated) => dedicated.$client.unsafe("select 1"));
+      expect(peer.passwords()).not.toContain("secondpw");
+    } finally {
+      await peer.close();
+      await closeRegisteredClients(peer.urlFor("ignored"));
+    }
+  }, 15000);
+
+  it("reports the reload outcome (unchanged / reloaded / rejected)", async () => {
+    const peer = await startAuthCapturingPeer();
+    let sourceUrl = peer.urlFor("firstpw");
+    try {
+      const db = createDb(sourceUrl, { credentialSource: () => sourceUrl });
+      await run(db);
+
+      expect(await reloadDatabaseCredential(db)).toEqual({ status: "unchanged" });
+
+      sourceUrl = peer.urlFor("secondpw");
+      expect(await reloadDatabaseCredential(db)).toEqual({ status: "reloaded" });
+
+      sourceUrl = peer.urlFor("thirdpw", "otherdb");
+      expect(await reloadDatabaseCredential(db)).toEqual({ status: "rejected", reason: "target-mismatch" });
+    } finally {
+      await peer.close();
+      await closeRegisteredClients(peer.urlFor("ignored"));
+    }
+  }, 15000);
+
+  it("mergeDatabaseCredentialPassword copies the file password in but keeps the base URL's options", async () => {
+    const base = "postgres://app:oldpw@db.internal:5432/app?sslmode=require&connect_timeout=5";
+    // Same target as base, but the file carries no connection options.
+    const source = () => "postgres://app:newpw@db.internal:5432/app";
+    const merged = await mergeDatabaseCredentialPassword(base, source);
+    const url = new URL(merged);
+    expect(url.password).toBe("newpw"); // rotated password from the file
+    expect(url.username).toBe("app");
+    expect(url.hostname).toBe("db.internal");
+    expect(url.port).toBe("5432");
+    expect(url.pathname).toBe("/app");
+    expect(url.searchParams.get("sslmode")).toBe("require"); // preserved
+    expect(url.searchParams.get("connect_timeout")).toBe("5"); // preserved
+  });
+
+  it("mergeDatabaseCredentialPassword leaves the base unchanged when the file is repointed", async () => {
+    const base = "postgres://app:oldpw@db.internal:5432/app?sslmode=require";
+    const source = () => "postgres://app:newpw@db.internal:5432/otherdb"; // different database
+    const merged = await mergeDatabaseCredentialPassword(base, source);
+    expect(merged).toBe(base);
+  });
+
+  it("mergeDatabaseCredentialPassword handles a password-less base and encodes special chars", async () => {
+    const base = "postgres://app@db.internal:5432/app?sslmode=require"; // no password in base
+    const source = () => "postgres://app:p%40ss@db.internal:5432/app"; // p@ss
+    const merged = await mergeDatabaseCredentialPassword(base, source);
+    const url = new URL(merged);
+    expect(decodeURIComponent(url.password)).toBe("p@ss"); // the real password
+    expect(url.searchParams.get("sslmode")).toBe("require");
+  });
 });

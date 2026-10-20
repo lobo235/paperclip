@@ -46,6 +46,7 @@ import { and, eq } from "drizzle-orm";
 import {
   createDb,
   reloadDatabaseCredential,
+  mergeDatabaseCredentialPassword,
   type CredentialSource,
   ensurePostgresDatabase,
   formatEmbeddedPostgresError,
@@ -443,11 +444,19 @@ async function startServerWithDatabaseTeardown(
   assertCloudDatabaseContract();
   if (config.databaseUrl) {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
-    migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
-  
     databaseCredentialSource = config.databaseUrlFile
       ? async () => (await readFile(resolve(config.databaseUrlFile!), "utf8")).trim()
       : undefined;
+    // When migrations run against the application database (no separate
+    // DATABASE_MIGRATION_URL) and the password is file-backed, resolve the
+    // current credential target-checked so a password-protected DB is
+    // reachable even when DATABASE_URL omits the password.
+    let migrationConnectionString = migrationUrl;
+    if (!config.databaseMigrationUrl && databaseCredentialSource) {
+      migrationConnectionString = await mergeDatabaseCredentialPassword(migrationUrl, databaseCredentialSource);
+    }
+    migrationSummary = await ensureMigrations(migrationConnectionString, "PostgreSQL");
+
     db = createDb(config.databaseUrl, { credentialSource: databaseCredentialSource });
     pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
@@ -865,8 +874,14 @@ async function startServerWithDatabaseTeardown(
       const retention = generalSettings.backupRetention;
       const verifyCheckpoint = trigger === "idle" || existsSync(idleBackupWakeMarker(config.databaseBackupDir));
 
+      // Copy the current file-backed password into the startup URL (target-
+      // checked) so backups track the rotated password while keeping the
+      // connection options (e.g. sslmode) that only DATABASE_URL carries.
+      const backupConnectionString = databaseCredentialSource
+        ? await mergeDatabaseCredentialPassword(activeDatabaseConnectionString, databaseCredentialSource)
+        : activeDatabaseConnectionString;
       const result = await runDatabaseBackup({
-        connectionString: activeDatabaseConnectionString,
+        connectionString: backupConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
         filenamePrefix: "paperclip",
@@ -2142,8 +2157,19 @@ async function startServerWithDatabaseTeardown(
     process.on("SIGHUP", () => {
       void (async () => {
         try {
-          await reloadDatabaseCredential(db);
-          logger.info(`SIGHUP: reloaded database credential from ${config.databaseUrlFile}`);
+          const result = await reloadDatabaseCredential(db);
+          if (result.status === "reloaded") {
+            logger.info(`SIGHUP: reloaded database credential from ${config.databaseUrlFile}`);
+          } else if (result.status === "unchanged") {
+            logger.info("SIGHUP: database credential unchanged; no pool reset");
+          } else if (result.status === "no-source") {
+            logger.info("SIGHUP: no file-backed database credential; nothing to reload");
+          } else {
+            logger.warn(
+              { reason: result.reason },
+              `SIGHUP: database credential change rejected (${result.reason}); keeping the existing pool`,
+            );
+          }
         } catch (error) {
           logger.warn({ err: error }, "SIGHUP: database credential reload failed; keeping the existing pool");
         }
