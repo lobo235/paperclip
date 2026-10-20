@@ -36,6 +36,12 @@ Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Prep
 
 Automated: [app detail](../../ui/src/pages/apps/AppDetail.test.tsx) covers agent/action controls, quarantined actions, and navigation using mocked requests.
 
+[Runtime assignment tests](../../server/src/__tests__/agent-runtime-assignments.test.ts)
+use PostgreSQL to verify committed assignment notifications, bounded snapshots,
+rollback, and concurrent AI adoption. The owning lifecycle plugin can read
+standing assignments through `ctx.agents.getRuntime`; this does not grant tool
+execution access or replace task-specific authorization.
+
 Manual: Grant one agent access, leave another excluded, and exercise off, ask, and allowed states for a harmless action. Reload between changes. Verify actual denied calls stay denied and ask-first creates a decision rather than executing early.
 
 ### `test-and-maintain`

@@ -24,6 +24,8 @@ import type {
   PluginEnvironmentDeleteTemplateParams,
   PluginEnvironmentDeleteTemplateResult,
   PluginEnvironmentDestroyLeaseParams,
+  PluginEnvironmentInspectLeaseParams,
+  PluginEnvironmentLeaseObservation,
   PluginEnvironmentExecuteParams,
   PluginEnvironmentExecuteResult,
   PluginEnvironmentRunnerIngressEndpointParams,
@@ -319,8 +321,8 @@ function resolveApiKey(config: DaytonaDriverConfig): string {
   return envApiKey;
 }
 
-function createDaytonaClient(config: DaytonaDriverConfig): Daytona {
-  providerUsed = true;
+function createDaytonaClient(config: DaytonaDriverConfig, readOnly = false): Daytona {
+  if (!readOnly) providerUsed = true;
   const clientConfig: DaytonaConfig = {
     apiKey: resolveApiKey(config),
   };
@@ -2883,6 +2885,30 @@ const plugin = definePlugin({
     } finally {
       sandboxHandleTeardownGates.end(scope, teardownGate);
       evictSandboxHandle(scope);
+    }
+  },
+
+  async onEnvironmentInspectLease(
+    params: PluginEnvironmentInspectLeaseParams,
+  ): Promise<PluginEnvironmentLeaseObservation> {
+    // An environment-variable fallback may have changed accounts since this
+    // historical allocation. Inspection requires explicitly scoped credentials.
+    if (typeof params.config.apiKey !== "string" || !params.config.apiKey.trim()) {
+      return { providerLeaseId: params.providerLeaseId, state: "unknown" };
+    }
+    const config = parseDriverConfig(params.config);
+    if (!config.apiUrl && (process.env.DAYTONA_API_URL?.trim() || process.env.DAYTONA_SERVER_URL?.trim())) {
+      return { providerLeaseId: params.providerLeaseId, state: "unknown" };
+    }
+    // Read directly from the provider. The setup-status path and cached lease
+    // reconnect path can start a stopped sandbox, so neither is an observation.
+    try {
+      const sandbox = await createDaytonaClient(config, true).get(params.providerLeaseId);
+      if (sandbox.id !== params.providerLeaseId) return { providerLeaseId: params.providerLeaseId, state: "unknown" };
+      return { providerLeaseId: sandbox.id, state: sandbox.state === "stopped" ? "stopped" : "active" };
+    } catch (error) {
+      if (error instanceof DaytonaNotFoundError) return { providerLeaseId: params.providerLeaseId, state: "destroyed" };
+      throw error;
     }
   },
 

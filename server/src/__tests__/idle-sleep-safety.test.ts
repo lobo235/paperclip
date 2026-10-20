@@ -592,13 +592,13 @@ if (!support.supported) console.warn(`Skipping idle sleep Postgres tests: ${supp
     },
   );
 
-  it("retains remote MCP connections alongside inert AI credentials", async () => {
+  it("allows saved outbound MCP connections alongside inert AI credentials", async () => {
     const { companyId, connection } = await seedAiConnection();
     await db.insert(toolConnections).values({
       companyId, applicationId: connection.applicationId, name: "Remote tools", uid: randomUUID(),
       connectionPurpose: "tool", transport: "mcp_remote", status: "active", enabled: true,
     });
-    expect(await read()).toEqual(present);
+    expect(await read()).toEqual(none);
   });
 
   async function seedFinishedFailedLease() {

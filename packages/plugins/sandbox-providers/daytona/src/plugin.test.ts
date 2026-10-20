@@ -40,6 +40,46 @@ import { environmentSyncErrorData, readEnvironmentSyncErrorDiagnostic, withEnvir
 import manifest from "./manifest.js";
 import { parseTarVerboseListingLine, splitLinkEntryOnce } from "./file-sync.js";
 
+describe("Daytona read-only resource inspection", () => {
+  const params = { driverKey: "daytona", companyId: "fixture-company", environmentId: "fixture-environment",
+    providerLeaseId: "sandbox-123", config: { apiKey: "fixture-not-a-key" } };
+  afterEach(() => { vi.clearAllMocks(); vi.unstubAllEnvs(); __resetDaytonaSandboxHandleCacheForTest(); });
+  it.each(["started", "stopped"])("observes a %s sandbox without lifecycle calls", async state => {
+    const sandbox = createMockSandbox({ state }); mockGet.mockResolvedValue(sandbox);
+    expect(await plugin.definition.onEnvironmentInspectLease!(params)).toEqual({ providerLeaseId: "sandbox-123", state: state === "stopped" ? "stopped" : "active" });
+    expect(mockGet).toHaveBeenLastCalledWith("sandbox-123");
+    for (const method of [sandbox.start, sandbox.stop, sandbox.delete, sandbox.archive, sandbox.refreshData]) expect(method).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+  it("accepts only typed provider not-found as deletion proof", async () => {
+    __resetDaytonaSandboxHandleCacheForTest();
+    mockGet.mockRejectedValue(new MockDaytonaNotFoundError("not found"));
+    expect(await plugin.definition.onEnvironmentInspectLease!(params)).toEqual({ providerLeaseId: "sandbox-123", state: "destroyed" });
+    expect(await plugin.definition.onIdleDrain!(new AbortController().signal)).toBe("none");
+  });
+  it("does not use an ambient account credential to certify historical deletion", async () => {
+    expect(await plugin.definition.onEnvironmentInspectLease!({ ...params, config: {} })).toEqual({ providerLeaseId: "sandbox-123", state: "unknown" });
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+  it.each(["DAYTONA_API_URL", "DAYTONA_SERVER_URL"])("does not substitute ambient %s for the recorded API endpoint", async variable => {
+    vi.stubEnv(variable, "https://replacement.example.test/api");
+    expect((await plugin.definition.onEnvironmentInspectLease!(params)).state).toBe("unknown");
+    expect(mockGet).not.toHaveBeenCalled();
+    mockGet.mockRejectedValue(new MockDaytonaNotFoundError("gone"));
+    expect((await plugin.definition.onEnvironmentInspectLease!({ ...params, config: { ...params.config, apiUrl: "https://recorded.example.test/api" } })).state).toBe("destroyed");
+  });
+  it.each(["401 unauthorized", "404 proxy not found", "network unavailable"])("does not turn %s into proof", async message => {
+    mockGet.mockRejectedValue(new Error(message));
+    await expect(plugin.definition.onEnvironmentInspectLease!(params)).rejects.toThrow(message);
+  });
+  it("rejects another resource and re-reads provider state on every observation", async () => {
+    mockGet.mockResolvedValueOnce(createMockSandbox({ id: "another-sandbox" })).mockRejectedValueOnce(new MockDaytonaNotFoundError("gone"));
+    expect((await plugin.definition.onEnvironmentInspectLease!(params)).state).toBe("unknown");
+    expect((await plugin.definition.onEnvironmentInspectLease!(params)).state).toBe("destroyed");
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Daytona idle eligibility", () => {
   it("permits a fresh unused provider but remains conservative after provider access", async () => {
     __resetDaytonaSandboxHandleCacheForTest();

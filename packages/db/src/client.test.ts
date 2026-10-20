@@ -296,8 +296,9 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
       const beforeRows = await retainedRows?.();
       const state = await inspectMigrations(connectionString);
       expect(state.status).toBe("needsMigrations");
-      const expectedPending = baseline === "master0346" ? [...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file)
-        : baseline === "muse0348" ? [...mergedMasterTail, ...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file)
+      const laterMigrations = journal.entries.filter(entry => entry.idx > 353).map(entry => `${entry.tag}.sql`);
+      const expectedPending = baseline === "master0346" ? [...[...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file), ...laterMigrations]
+        : baseline === "muse0348" ? [...[...mergedMasterTail, ...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file), ...laterMigrations]
         : journal.entries.map(entry => `${entry.tag}.sql`);
       expect(state).toMatchObject({ pendingMigrations: expectedPending });
       if (baseline === "muse0348") {

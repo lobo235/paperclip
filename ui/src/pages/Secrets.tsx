@@ -2994,10 +2994,10 @@ export function Secrets() {
                     }));
                   }}
                 >
-                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
+                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager"}>
                     Ready
                   </option>
-                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
+                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager"}>
                     Warning
                   </option>
                   <option value="coming_soon">Coming soon</option>
@@ -3571,7 +3571,7 @@ export function ProviderVaultsTab({
     id: providerId,
     provider: providerMap.get(providerId),
     Icon: providerFamilyIcon(providerId),
-    isComingSoonFamily: providerId === "gcp_secret_manager" || providerId === "vault",
+    isComingSoonFamily: providerId === "gcp_secret_manager",
     configs: providerConfigs.filter((config) => config.provider === providerId),
   }));
 

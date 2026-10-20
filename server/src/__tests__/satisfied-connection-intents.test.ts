@@ -14,6 +14,9 @@ import { DELIVERY_QUEUES, subscribeDeliveryWork } from "../services/delivery-wor
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../services/legacy-execution-recovery.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
+import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { idleWorkSnapshot } from "../services/task-admission.js";
+import { readIdleSleepSafety, type IdleSleepDrainStatus } from "../services/idle-sleep-safety.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -85,6 +88,60 @@ describePostgres("already available connection requests", () => {
       expect(wakeup).toHaveBeenCalledOnce();
     } finally { unsubscribe(); }
   });
+
+  it("releases a created human setup card's worker hold, then resumes when access becomes available", async () => {
+    const f = await seed();
+    await db.delete(issueThreadInteractions);
+    await db.update(toolConnections).set({ status: "draft", enabled: false }).where(eq(toolConnections.id, f.connection.id));
+    const [source] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
+      status: "succeeded", finishedAt: new Date(), contextSnapshot: { issueId: f.issueId } }).returning();
+    let cardId = "";
+    const wakeup = vi.fn(async () => {
+      await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId, source: "automation",
+        status: "queued", idempotencyKey: `connection-intent:${cardId}:expired` });
+      return null;
+    });
+    const service = connectionIntentDeliveryService(db, { wakeup });
+    const errors: unknown[] = [];
+    const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError: error => { errors.push(error); } });
+    let sawPassive!: () => void, sawDelivered!: () => void;
+    const passive = new Promise<void>(resolve => { sawPassive = resolve; });
+    const delivered = new Promise<void>(resolve => { sawDelivered = resolve; });
+    const wait = async (event: Promise<void>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { await Promise.race([event, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Connection worker did not settle")), 8000); })]); }
+      finally { clearTimeout(timer); }
+      await new Promise<void>(resolve => setImmediate(resolve));
+    };
+    try {
+      await coordinator.register(DELIVERY_QUEUES.connection, { retryMs: 5000, run: () => service.sweepPending(),
+        hasPending: async () => { const pending = await service.hasPending();
+          if (!pending && service.nextRunAt() !== null) sawPassive();
+          if (!pending && wakeup.mock.calls.length > 0) sawDelivered();
+          return pending;
+        }, nextRunAt: service.nextRunAt,
+      }).ready;
+      const card = await issueThreadInteractionService(db).createConnectionIntent({ id: f.issueId, companyId: f.companyId }, {
+        payload: f.intent.payload, sourceRunId: source!.id, addresseeUserId: "connection-owner", idempotencyKey: "passive-setup-card",
+      });
+      cardId = card.id;
+      await wait(passive);
+      expect(errors).toEqual([]); expect(idleWorkSnapshot().active).toBe(0);
+      expect((await db.select().from(issueThreadInteractions))[0].status).toBe("pending");
+      const now = Date.now(), ownerId = randomUUID();
+      const drain = (): IdleSleepDrainStatus => ({ ownerId, draining: true, startedAt: new Date(now - 1000),
+        expiresAt: new Date(now + 60_000), activeRuns: 0, pendingWakes: 0 });
+      expect(await readIdleSleepSafety(db, drain, Date.now, ownerId, async () => "none", undefined, undefined, true, true)).toMatchObject({ backgroundWork: "none" });
+      // This mutation has no queue notification: awake-only maintenance must
+      // still discover new access; after sleep startup performs the same scan.
+      await db.update(toolConnections).set({ status: "active", enabled: true }).where(eq(toolConnections.id, f.connection.id));
+      await wait(delivered);
+      expect(errors).toEqual([]); expect(wakeup).toHaveBeenCalledOnce();
+      expect((await db.select().from(connectionIntentDeliveries))[0].deliveredAt).not.toBeNull();
+      expect((await db.select().from(agentWakeupRequests))[0]).toMatchObject({ status: "queued", idempotencyKey: `connection-intent:${cardId}:expired` });
+      expect(await readIdleSleepSafety(db, drain, Date.now, ownerId, async () => "none", undefined, undefined, true, true)).toMatchObject({ backgroundWork: "present" });
+    } finally { await coordinator.stop(); }
+  }, 20_000);
 
   it.each(["wrong_identity", "revoked", "disabled", "removed_member", "denied_policy"] as const)("rechecks %s after the card retires", async (reason) => {
     const f = await seed(); const run = await retry(f);

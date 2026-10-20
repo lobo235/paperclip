@@ -10447,8 +10447,9 @@ describe("runnerd provider runtime wiring", () => {
     { PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/test" },
     { PAPERCLIP_NATIVE_MCP_TOKEN: "private-run-token" },
   ])("rejects partial remote assigned MCP bindings", async (runnerEnvironment) => {
+    const prepareRunnerEnvironment = vi.fn(async () => runnerEnvironment);
     await expect(createRunnerdBackend({
-      db: leaseDb(execution), execution, runnerInstanceId: "runner-partial-mcp", runnerEnvironment,
+      db: leaseDb(execution), execution, runnerInstanceId: "runner-partial-mcp", runnerEnvironment, prepareRunnerEnvironment,
       runnerExecutionTarget: {
         kind: "remote", transport: "sandbox", providerKey: "daytona",
         leaseId: "lease-partial-mcp", remoteCwd: "/home/daytona/paperclip-workspace",
@@ -10456,6 +10457,138 @@ describe("runnerd provider runtime wiring", () => {
       } as never,
     })).rejects.toThrow("assigned native MCP launch binding is incomplete");
     expect(state.createAssignedMcpTools).not.toHaveBeenCalled();
+    expect(prepareRunnerEnvironment).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "environment", "assigned", "both"] as const)("drains overlapping backend preparation before admission: %s", async failure => {
+    let releaseEnvironment!: () => void;
+    let releaseAssigned!: () => void;
+    let assignedStarted!: () => void;
+    const environmentGate = new Promise<void>(resolve => { releaseEnvironment = resolve; });
+    const assignedGate = new Promise<void>(resolve => { releaseAssigned = resolve; });
+    const assignedReady = new Promise<void>(resolve => { assignedStarted = resolve; });
+    const runnerEnvironment = {
+      PAPERCLIP_NATIVE_MCP_NAME: "paperclip-assigned",
+      PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/assigned-overlap",
+      PAPERCLIP_NATIVE_MCP_TOKEN: "private-overlap-token",
+    };
+    const assignedMcpTools = { definitions: () => [], has: () => false, execute: vi.fn() };
+    const prepareRunnerEnvironment = vi.fn(async () => {
+      await environmentGate;
+      if (failure === "environment" || failure === "both") throw new Error("environment failed");
+      return { ...runnerEnvironment, PAPERCLIP_GITHUB_BROKER_TOKEN: "prepared-github-capability" };
+    });
+    state.createAssignedMcpTools.mockImplementationOnce(async () => {
+      assignedStarted();
+      await assignedGate;
+      if (failure === "assigned" || failure === "both") throw new Error("assigned failed");
+      return assignedMcpTools;
+    });
+    state.createBackend.mockClear();
+    state.createTransport.mockClear();
+    let settled = false;
+    const preparation = createRunnerdBackend({
+      db: leaseDb(execution), execution, runnerInstanceId: "runner-overlap",
+      runnerEnvironment, prepareRunnerEnvironment,
+      runnerExecutionTarget: {
+        kind: "remote", transport: "sandbox", providerKey: "daytona",
+        leaseId: "lease-overlap", remoteCwd: "/home/daytona/paperclip-workspace",
+        runner: { execute: vi.fn() },
+      } as never,
+    }).then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+    try {
+      await assignedReady;
+      expect(prepareRunnerEnvironment).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(state.createBackend).not.toHaveBeenCalled();
+      if (failure === "assigned") releaseAssigned();
+      else releaseEnvironment();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(state.createBackend).not.toHaveBeenCalled();
+      releaseEnvironment();
+      releaseAssigned();
+      const result = await preparation;
+      if (failure !== "success") {
+        expect(result).toMatchObject({ error: { message: failure === "assigned" ? "assigned failed" : "environment failed" } });
+        expect(state.createBackend).not.toHaveBeenCalled();
+      } else {
+        expect(result).not.toHaveProperty("error");
+        expect(state.toolAuthorityDefinitions).toHaveBeenCalledWith(expect.objectContaining({ assignedMcpTools }));
+        state.createBackend.mock.calls[0]![1].codexTransportFactory!();
+        const options = state.createTransport.mock.calls[0]![0] as { environment: NodeJS.ProcessEnv };
+        expect(options.environment.PAPERCLIP_GITHUB_BROKER_TOKEN).toBe("prepared-github-capability");
+        expect(options.environment.PAPERCLIP_NATIVE_MCP_TOKEN).toBeUndefined();
+      }
+    } finally {
+      releaseEnvironment();
+      releaseAssigned();
+      await preparation;
+    }
+  });
+
+  it.each(["github", "assigned"] as const)("cleans run-owned access after overlapping executor failure: %s", async failure => {
+    const issueService = vi.spyOn(issueServiceModule, "issueService").mockReturnValue({
+      update: vi.fn(async () => ({ status: "blocked", statusVersion: 1 })),
+    } as unknown as ReturnType<typeof issueServiceModule.issueService>);
+    let releaseGitHub!: () => void;
+    let releaseAssigned!: () => void;
+    const githubGate = new Promise<void>(resolve => { releaseGitHub = resolve; });
+    const assignedGate = new Promise<void>(resolve => { releaseAssigned = resolve; });
+    const deactivate = vi.fn();
+    const stop = vi.fn(async () => undefined);
+    const activate = vi.fn(() => deactivate);
+    githubAccess.create.mockImplementationOnce(async () => {
+      await githubGate;
+      if (failure === "github") throw new Error("github setup failed");
+      return { env: { PAPERCLIP_GITHUB_BROKER_TOKEN: "run-owned-capability" }, ready: true,
+        duplexRequested: false, activate, stop };
+    });
+    state.createAssignedMcpTools.mockImplementationOnce(async () => {
+      await assignedGate;
+      if (failure === "assigned") throw new Error("assigned setup failed");
+      return { definitions: () => [], has: () => false, execute: vi.fn() };
+    });
+    state.execute.mockClear();
+    state.createBackend.mockClear();
+    let settled = false;
+    const running = executePaperclipNativeSession({
+      db: leaseDb(execution), execution, runnerInstanceId: "runner-overlap-cleanup",
+      useRunnerd: true, managedGitHub: true,
+      runnerEnvironment: {
+        PAPERCLIP_NATIVE_MCP_NAME: "paperclip-assigned",
+        PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/assigned-cleanup",
+        PAPERCLIP_NATIVE_MCP_TOKEN: "private-cleanup-token",
+      },
+      runnerExecutionTarget: {
+        kind: "remote", transport: "sandbox", providerKey: "daytona",
+        leaseId: "lease-overlap-cleanup", remoteCwd: "/home/daytona/paperclip-workspace",
+        runner: { execute: vi.fn() },
+      } as never,
+    }).then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(state.createAssignedMcpTools).toHaveBeenCalledOnce());
+      expect(githubAccess.create).toHaveBeenCalled();
+      if (failure === "github") releaseGitHub();
+      else releaseAssigned();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      releaseGitHub();
+      releaseAssigned();
+      expect(await running).toMatchObject({ error: { message: `${failure} setup failed` } });
+      expect(state.execute).not.toHaveBeenCalled();
+      expect(state.createBackend).not.toHaveBeenCalled();
+      if (failure === "assigned") {
+        expect(activate).toHaveBeenCalledWith(execution.binding);
+        expect(deactivate).toHaveBeenCalledOnce();
+        expect(stop).toHaveBeenCalledOnce();
+      }
+    } finally {
+      releaseGitHub();
+      releaseAssigned();
+      await running;
+      issueService.mockRestore();
+    }
   });
 
   it("keeps assigned MCP credentials on the control plane for remote Codex", async () => {

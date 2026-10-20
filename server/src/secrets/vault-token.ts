@@ -331,7 +331,11 @@ export function detectVaultAuthSource(input: {
   }
 
   if (config.auth.method === "approle") {
-    const roleId = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID);
+    // The env var wins; the vault config's auth.role is the fallback so a
+    // company that saved the role in the UI is not broken when the env var
+    // is later removed. The secret_id is always from env (or file) — it is
+    // a bootstrap credential, not a managed secret.
+    const roleId = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID) ?? config.auth.role ?? undefined;
     const secretId = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID);
     const roleIdPath = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID_FILE) ?? undefined;
     const secretIdPath = asString(env.PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID_FILE) ?? undefined;
@@ -341,7 +345,7 @@ export function detectVaultAuthSource(input: {
         message:
           "auth.method = 'approle' requires role_id and secret_id via " +
           "PAPERCLIP_SECRETS_VAULT_APPROLE_ROLE_ID and PAPERCLIP_SECRETS_VAULT_APPROLE_SECRET_ID " +
-          "(or the corresponding *_FILE paths)",
+          "(or the corresponding *_FILE paths), or auth.role in the vault config",
       };
     }
     return {

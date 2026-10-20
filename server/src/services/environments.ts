@@ -1,3 +1,4 @@
+import { withoutCleanupVerification } from "./cleanup-verification-proof.js";
 import { randomUUID } from "node:crypto";
 
 import { SANDBOX_PLATFORM_PROBE_METADATA_KEY } from "./environment-custom-image-runtime.js";
@@ -1463,7 +1464,7 @@ export function environmentService(db: Db) {
         releasedAt: null,
         failureReason: null,
         cleanupStatus: null,
-        metadata: input.metadata ?? null,
+        metadata: withoutCleanupVerification(input.metadata),
         createdAt: now,
         updatedAt: now,
       };
@@ -1584,7 +1585,7 @@ export function environmentService(db: Db) {
                     expiresAt: input.expiresAt ?? null,
                     failureReason: null,
                     cleanupStatus: null,
-                    metadata: input.metadata ?? null,
+                    metadata: withoutCleanupVerification(input.metadata),
                     updatedAt: now,
                   })
                   .where(
@@ -1739,7 +1740,7 @@ export function environmentService(db: Db) {
             releasedAt: now,
             failureReason: input.failureReason,
             cleanupStatus: "failed",
-            metadata: input.metadata ?? null,
+            metadata: withoutCleanupVerification(input.metadata),
             createdAt: now,
             updatedAt: now,
           })
@@ -1759,7 +1760,7 @@ export function environmentService(db: Db) {
       const row = await db
         .update(environmentLeases)
         .set({
-          metadata,
+          metadata: withoutCleanupVerification(metadata),
           lastUsedAt: new Date(),
           updatedAt: new Date(),
         })

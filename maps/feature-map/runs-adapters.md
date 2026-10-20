@@ -66,7 +66,21 @@ recipe first. Discovery/creation read company-bound immutable-image evidence
 without allocating a target. A mutable image or snapshot name does not establish
 native compatibility. Then test the actual selected runtime with its selected
 account/model: a legacy CLI or authentication probe alone cannot establish native
-readiness. Missing dependencies, failed authentication, invalid models and
+readiness. For an image-provided Codex harness, verify both final executables
+after concurrent artifact preparation on an eligible provider. Repeat with a
+failed runner probe and confirm the harness work has settled before failure
+returns. Providers without concurrent sync and explicit harness installs remain
+serial. The [real-shell artifact controls](../../server/src/services/native-runtime/native-artifact-preparation.test.ts)
+cover these source contracts; they do not establish live reply latency.
+For remote native Codex with managed GitHub access, inspect the controller
+preparation spans for overlapping GitHub setup and assigned MCP discovery.
+Provider startup must wait for both. Force either preparation to fail while the
+other is pending; confirm that the pending operation settles and run-owned access
+is released before failure returns. Repeat a warm follow-up and retain its actual
+reply time. The [executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
+cover ordering, failure drain and credential projection; they do not qualify a
+live response-time target.
+Missing dependencies, failed authentication, invalid models and
 incompatible custom settings must remain actionable errors without silent runner
 switching. Saved unchanged execution can still be tested without applying new
 selection policy, but runtime/account validation must still run.

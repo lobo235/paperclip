@@ -34,6 +34,13 @@ own policy and access review.
 Gaps: Granting access is distinct from using access. No equivalent agent management path
 exists in these routes.
 
+The owning lifecycle plugin can read bounded standing connection and active
+profile assignments with `ctx.agents.getRuntime`. It requires the existing
+`agents.lifecycle.manage` capability and agent ownership checks. Committed
+assignment changes use the opt-in `agent_runtime` stream. These inputs contain
+no grant credentials and do not authorize a task's tool calls. See the
+[runtime contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#standing-connection-assignments).
+
 ## `action-policy`
 
 Review: `baseline`.

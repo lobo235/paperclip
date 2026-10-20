@@ -479,16 +479,18 @@ export function resolveVaultConfig(input: {
   // in-cluster default is used and a differing config value is ignored.
   const operatorSaTokenPath = input.env.PAPERCLIP_SECRETS_VAULT_SA_TOKEN_PATH;
   const configSaTokenPath = authRaw ? asString((authRaw as Record<string, unknown>).saTokenPath) : null;
-  if (auth && configSaTokenPath !== null && configSaTokenPath !== DEFAULT_SA_TOKEN_PATH) {
+  if (auth) {
     if (operatorSaTokenPath !== undefined) {
-      if (configSaTokenPath !== operatorSaTokenPath) {
-        warnings.push(
-          "vault auth.saTokenPath is overridden by the operator-deployed path; " +
-            "a per-vault saTokenPath cannot redirect which file the deployment reads as the JWT",
-        );
+      if (auth.saTokenPath !== operatorSaTokenPath) {
+        if (configSaTokenPath !== null && configSaTokenPath !== operatorSaTokenPath) {
+          warnings.push(
+            "vault auth.saTokenPath is overridden by the operator-deployed path; " +
+              "a per-vault saTokenPath cannot redirect which file the deployment reads as the JWT",
+          );
+        }
+        auth = { ...auth, saTokenPath: operatorSaTokenPath };
       }
-      auth = { ...auth, saTokenPath: operatorSaTokenPath };
-    } else if (!allowConfigAddress) {
+    } else if (configSaTokenPath !== null && configSaTokenPath !== DEFAULT_SA_TOKEN_PATH && !allowConfigAddress) {
       warnings.push(
         "vault auth.saTokenPath is ignored: no operator-pinned path is set " +
           "(PAPERCLIP_SECRETS_VAULT_SA_TOKEN_PATH) and the operator has not set " +
@@ -505,16 +507,18 @@ export function resolveVaultConfig(input: {
   // is honored only under the same opt-in flag that gates the address.
   const operatorK8sRole = asString(input.env.PAPERCLIP_SECRETS_VAULT_K8S_ROLE) ?? undefined;
   const configK8sRole = authRaw ? asString((authRaw as Record<string, unknown>).role) : null;
-  if (auth && auth.method === "kubernetes" && configK8sRole !== null) {
+  if (auth && auth.method === "kubernetes") {
     if (operatorK8sRole !== undefined) {
-      if (configK8sRole !== operatorK8sRole) {
-        warnings.push(
-          "vault auth.role is overridden by the operator-deployed Kubernetes role; " +
-            "a per-vault role cannot change which Vault auth role the deployment login uses",
-        );
+      if (auth.role !== operatorK8sRole) {
+        if (configK8sRole !== null && configK8sRole !== operatorK8sRole) {
+          warnings.push(
+            "vault auth.role is overridden by the operator-deployed Kubernetes role; " +
+              "a per-vault role cannot change which Vault auth role the deployment login uses",
+          );
+        }
+        auth = { ...auth, role: operatorK8sRole };
       }
-      auth = { ...auth, role: operatorK8sRole };
-    } else if (!allowConfigAddress) {
+    } else if (configK8sRole !== null && !allowConfigAddress) {
       warnings.push(
         "vault auth.role is ignored: no operator-pinned role is set " +
           "(PAPERCLIP_SECRETS_VAULT_K8S_ROLE) and the operator has not set " +
@@ -810,9 +814,19 @@ export function createVaultProvider(
                 version = existing.version;
               } catch (reReadErr) {
                 if (reReadErr instanceof SecretProviderClientError && reReadErr.code === "not_found") {
-                  throw err;
+                  // The key was soft-deleted (Vault KV v2 DELETE marks the
+                  // latest version deleted but keeps the version history).
+                  // cas:0 rejects it because the key still exists. Write a
+                  // new version on top of the soft-deleted entry so the
+                  // re-created secret gets a clean value.
+                  ({ version } = await gateway.putKv({
+                    mount: config.kvMount,
+                    path,
+                    data: { value: input.value },
+                  }));
+                } else {
+                  throw reReadErr;
                 }
-                throw reReadErr;
               }
             } else {
               throw err;
@@ -911,7 +925,22 @@ export function createVaultProvider(
               const existing = await gateway.getKv({ mount, path });
               if (existing.data["value"] === input.value) {
                 version = existing.version;
-              } else if (existing.version === ctx.version) {
+              } else if (existing.version <= ctx.version) {
+                // Vault is at or behind the Paperclip version we are writing:
+                // an orphaned write from a failed DB save left Vault at or
+                // past ctx.version. Write on top of the current Vault version
+                // so rotation re-aligns instead of bricking.
+                if (existing.version < ctx.version - 1) {
+                  logger.warn(
+                    {
+                      mount,
+                      path,
+                      vaultVersion: existing.version,
+                      paperclipVersion: ctx.version,
+                    },
+                    "vault createVersion: Vault is more than one version behind Paperclip; writing on top",
+                  );
+                }
                 ({ version } = await gateway.putKv({
                   mount,
                   path,
@@ -919,6 +948,10 @@ export function createVaultProvider(
                   cas: existing.version,
                 }));
               } else {
+                // Vault is MORE than one ahead of Paperclip: a newer rotation
+                // committed a different value that Paperclip did not record.
+                // Rethrow the conflict rather than silently clobbering a
+                // newer value with a stale replay.
                 throw err;
               }
             } else {

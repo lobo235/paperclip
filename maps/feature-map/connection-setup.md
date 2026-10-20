@@ -105,6 +105,11 @@ Automated: AppsConnect's generic MCP cases cover probe-driven auth, private or
 unreachable endpoints, preregistered clients, secret-backed headers, and unsafe
 authorization URLs. These are component/API mocks, not remote provider proof.
 
+[Catalog publication](../../server/src/__tests__/tool-catalog-publication.test.ts)
+uses PostgreSQL and a controlled MCP response to check bounded writes, repeated
+page entries, preserved action choices, rollback, and concurrent publication.
+It does not verify a live provider's discovery contract.
+
 Manual: connect a known test MCP URL through the link flow, verify its saved
 endpoint and a read-only action, then repeat with a bad URL and wrong credential.
 The error should explain the next action and preserve non-secret setup context.

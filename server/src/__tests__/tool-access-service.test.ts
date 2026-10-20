@@ -8632,15 +8632,17 @@ describeEmbeddedPostgres("tool access service", () => {
         "state",
       )!;
       const originalTransaction = db.transaction.bind(db);
-      let transactionCount = 0;
       const transactionSpy = vi
         .spyOn(db, "transaction")
-        .mockImplementation((async (operation, config) => {
-          transactionCount += 1;
-          if (transactionCount === 2)
-            throw new Error("recommended defaults failed");
-          return originalTransaction(operation, config);
-        }) as typeof db.transaction);
+        .mockImplementation((async (operation, config) => originalTransaction(async tx => {
+          const insert = tx.insert.bind(tx);
+          const insertSpy = vi.spyOn(tx, "insert").mockImplementation(((table: Parameters<typeof tx.insert>[0]) => {
+            if (table === toolProfiles) throw new Error("recommended defaults failed");
+            return insert(table);
+          }) as typeof tx.insert);
+          try { return await operation(tx); }
+          finally { insertSpy.mockRestore(); }
+        }, config)) as typeof db.transaction);
 
       await expect(
         service.completePaperclipCloudConnectorCallback({
@@ -10152,6 +10154,91 @@ describeEmbeddedPostgres("tool access service", () => {
       }
     },
   );
+
+  it.each((["personal", "organization", "managed"] as const).flatMap(mode =>
+    (["app finishing", "new tool discovery"] as const).map(change => ({ mode, change }))))("orders $mode OAuth persistence with concurrent $change", async ({ mode, change }) => {
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
+    vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_SECRET", "slack-client-secret");
+    const company = await createCompany(db);
+    const userId = `catalog-oauth-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connector = mode === "managed" ? fakeGmailConnector(company.id, userId) : undefined;
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const definition = getConnectableAppDefinition(mode === "managed" ? "gmail" : "slack")!;
+    const availability = definition.ownershipAvailability;
+    if (mode === "managed") definition.ownershipAvailability = { ...availability, platform_shared: true };
+    let discoverNewTool = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url) === "https://slack.com/api/oauth.v2.access") return mcpHttpResponse(oauthToken("fixture-access-token", "fixture-refresh-token"));
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return mcpHttpResponse({ jsonrpc: "2.0", id: body.id, result: body.method === "initialize" ? { protocolVersion: "2025-06-18" }
+        : { tools: [{ name: "search_messages", annotations: { readOnlyHint: true } }, ...(discoverNewTool ? [{ name: "new_search", annotations: { readOnlyHint: true } }] : [])] } });
+    });
+    let release!: () => void;
+    let transactionSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let completed: Promise<PromiseSettledResult<unknown>[]> | undefined;
+    let blocker: Promise<unknown> | undefined;
+    try {
+      const connected = await service.connectGalleryApp(company.id, { galleryKey: mode === "managed" ? "gmail" : "slack", ...(mode === "managed" ? { connectionMethodKey: "paperclip-draft" } : {}), name: "Concurrent catalog OAuth", grantKind: mode === "organization" ? "organization" : "user" }, actor);
+      const redirectUri = mode === "managed" ? "https://paperclip.example/api/tools/oauth/cloud-connector/callback" : "https://paperclip.example/api/tools/oauth/callback";
+      const start = () => service.startOAuth(company.id, connected.connectionId, { redirectUri, actor, ...(mode === "organization" ? {} : { subjectUserId: userId }) });
+      const complete = (state: string, claim: string) => mode === "managed"
+        ? service.completePaperclipCloudConnectorCallback({ state, claimId: claim, actor })
+        : service.completeOAuthCallback({ state, code: claim, redirectUri, actor });
+      const initial = await start();
+      await complete(new URL(initial.authorizationUrl).searchParams.get("state")!, "initial");
+      const reconnect = await start();
+      const state = new URL(reconnect.authorizationUrl).searchParams.get("state")!;
+      const [stateRow] = await db.select().from(toolOauthStates).where(eq(toolOauthStates.state, state));
+      expect(stateRow.subjectUserId).toBe(mode === "organization" ? null : userId);
+      discoverNewTool = change === "new tool discovery";
+      await db.execute(sql`CREATE OR REPLACE FUNCTION catalog_oauth_fixture_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        PERFORM pg_advisory_xact_lock(hashtextextended(NEW.id::text, 0)); RETURN NEW; END $$`);
+      await db.execute(sql.raw(`CREATE TRIGGER catalog_oauth_fixture_pause AFTER UPDATE ON tool_connections FOR EACH ROW WHEN (NEW.id = '${connected.connectionId}'::uuid) EXECUTE FUNCTION catalog_oauth_fixture_pause()`));
+      let locked!: () => void;
+      const held = new Promise<void>(resolve => { locked = resolve; });
+      const resume = new Promise<void>(resolve => { release = resolve; });
+      blocker = db.transaction(async tx => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${connected.connectionId}, 0))`);
+        locked(); await resume;
+      });
+      await held;
+      const pids: number[] = [];
+      const transaction = db.transaction.bind(db);
+      transactionSpy = vi.spyOn(db, "transaction").mockImplementation((async (operation, config) => transaction(async tx => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+        const [backend] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+        pids.push(Number(backend.pid));
+        return operation(tx);
+      }, config)) as typeof db.transaction);
+      const waitForLock = (index: number) => vi.waitFor(async () => {
+        expect(pids.length).toBeGreaterThan(index);
+        const [activity] = await db.execute(sql`SELECT wait_event_type FROM pg_stat_activity WHERE pid = ${pids[index]}`);
+        expect(activity.wait_event_type).toBe("Lock");
+      }, { timeout: 5000 });
+      const callback = complete(state, "reconnect");
+      const callbackResult = Promise.allSettled([callback]);
+      await waitForLock(0);
+      const publication = change === "new tool discovery" ? service.refreshCatalog(connected.connectionId, actor, { credentialHeaders: { Authorization: "Bearer fixture-catalog-token" } })
+        : service.finishGalleryAppConnection(company.id, connected.connectionId, { enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents" }, actor);
+      completed = Promise.allSettled([callback, publication]);
+      await waitForLock(1);
+      release(); await blocker;
+      const results = await completed;
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+      expect((await callbackResult)[0].status).toBe("fulfilled");
+      expect(await service.getConnection(connected.connectionId, company.id)).toMatchObject({ status: "active" });
+      if (change === "new tool discovery") expect(await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, connected.connectionId))).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "new_search" })]));
+      else expect(await db.select().from(toolProfiles).where(and(eq(toolProfiles.companyId, company.id), eq(toolProfiles.profileKey, `app:${connected.connectionId}`)))).toHaveLength(1);
+    } finally {
+      release?.(); await blocker; await completed;
+      transactionSpy?.mockRestore();
+      await db.execute(sql`DROP TRIGGER IF EXISTS catalog_oauth_fixture_pause ON tool_connections; DROP FUNCTION IF EXISTS catalog_oauth_fixture_pause()`);
+      definition.ownershipAvailability = availability;
+    }
+  }, 20000);
 
   it("promotes a personal OAuth identity only after Everyone in the company is chosen", async () => {
     vi.stubEnv("PAPERCLIP_TOOL_OAUTH_SLACK_CLIENT_ID", "slack-client-id");
