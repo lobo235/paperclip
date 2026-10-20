@@ -459,11 +459,35 @@ async function startServerWithDatabaseTeardown(
     }
     migrationSummary = await ensureMigrations(migrationConnectionString, "PostgreSQL");
 
-    db = createDb(config.databaseUrl, { credentialSource: databaseCredentialSource });
+    // When the credential is file-backed from a dynamic role, the file may carry
+    // a UNIQUE username (e.g. the vault-gateway role mints a distinct role per
+    // lease). postgres.js fixes the username at construction, so build the app
+    // client from the file's full URL (real username + password) rather than the
+    // placeholder in DATABASE_URL; a later username change is adopted by the
+    // SIGHUP restart below. Without a readable/valid file, fall back to
+    // DATABASE_URL itself (whose pass() callback handles a same-user rotation).
+    let appConnectionString = config.databaseUrl;
+    if (databaseCredentialSource) {
+      let fileUrl = "";
+      try {
+        fileUrl = (await databaseCredentialSource()).trim();
+      } catch {
+        fileUrl = "";
+      }
+      try {
+        const parsed = new URL(fileUrl);
+        if (parsed.protocol === "postgres:" || parsed.protocol === "postgresql:") {
+          appConnectionString = fileUrl;
+        }
+      } catch {
+        appConnectionString = config.databaseUrl;
+      }
+    }
+    db = createDb(appConnectionString, { credentialSource: databaseCredentialSource });
     pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
-    activeDatabaseConnectionString = config.databaseUrl;
-    startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };
+    activeDatabaseConnectionString = appConnectionString;
+    startupDbInfo = { mode: "external-postgres", connectionString: appConnectionString };
   } else {
     const moduleName = "embedded-postgres";
     let EmbeddedPostgres: EmbeddedPostgresCtor;
@@ -2193,6 +2217,20 @@ async function startServerWithDatabaseTeardown(
             logger.info("SIGHUP: database credential unchanged; no pool reset");
           } else if (result.status === "no-source") {
             logger.info("SIGHUP: no file-backed database credential; nothing to reload");
+          } else if (result.reason === "target-mismatch") {
+            // The credential now points at a different username (a freshly
+            // minted dynamic role, e.g. the vault-gateway unique-user rotation)
+            // or another host/port/db. postgres.js fixes the username at
+            // construction and the live pool cannot adopt it in place, so
+            // restart the process: Nomad re-runs the task, startup re-reads the
+            // file, and a fresh client is built from the new full URL. Exit 42
+            // is a deliberate rotation-restart signal (distinct from a real
+            // failure); the task's restart policy re-arms it indefinitely.
+            logger.info(
+              { reason: result.reason },
+              "SIGHUP: database credential target changed; restarting to adopt the new credential",
+            );
+            process.exit(42);
           } else {
             logger.warn(
               { reason: result.reason },
