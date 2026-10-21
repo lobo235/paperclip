@@ -205,7 +205,9 @@ export interface StartedServer {
 type StartupDatabaseTeardown = { close: (() => Promise<void>) | null };
 
 // Ends the pool behind a drizzle client. Tolerates a client without `$client`
-// (test doubles) and never throws, so it is safe on every exit path.
+// (test doubles). sql.end() can still reject (e.g. an open query past the
+// timeout), so callers that must preserve an operation's own result or error
+// wrap the promise rather than awaiting it bare.
 async function endDatabaseClient(client: unknown, timeoutSeconds: number): Promise<void> {
   const sql = (client as { $client?: { end?: (options?: { timeout?: number }) => Promise<void> } } | null)
     ?.$client;
@@ -525,7 +527,14 @@ async function startServerWithDatabaseTeardown(
       migrationDbProvider = createFileMigrationDbHandle({
         readUrl: migrationCredentialSource,
         createClient: (url) => createDb(url),
-        endClient: (client, timeout) => endDatabaseClient(client, timeout),
+        endClient: (client, timeout) =>
+          endDatabaseClient(client, timeout).catch((err) => {
+            // Closing the per-op migrator connection must not mask the
+            // operation's own result or error: a rejection here would replace
+            // a successful migration (or the migration's real error) with a
+            // connection-end error.
+            logger.warn({ err }, "failed to end per-op plugin-migration connection");
+          }),
       });
     }
     // Fail loud, not silently: with a file-backed migration credential the
@@ -744,6 +753,17 @@ async function startServerWithDatabaseTeardown(
     });
   
     db = createDb(embeddedConnectionString);
+    // Fail loud, not silently: the file-backed migrator (DATABASE_MIGRATION_URL_FILE)
+    // exists for external Postgres, where the app pool's identity is itself
+    // file-backed. In embedded mode the variable would be silently ignored and
+    // plugin migrations would run as the app user — the same silent case the
+    // file-backed path exists to rule out, so refuse to boot instead.
+    if (config.databaseMigrationUrlFile) {
+      throw new Error(
+        "DATABASE_MIGRATION_URL_FILE is only supported with external Postgres (DATABASE_URL); " +
+          "remove it to run plugin migrations on the embedded database",
+      );
+    }
     pluginMigrationDb = db;
     logger.info("Embedded PostgreSQL ready");
     activeDatabaseConnectionString = embeddedConnectionString;
