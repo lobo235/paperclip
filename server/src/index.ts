@@ -45,6 +45,9 @@ import { warnIfUnsupportedNodeVersion } from "@paperclipai/shared/node-version";
 import { and, eq } from "drizzle-orm";
 import {
   createDb,
+  createFileMigrationDbHandle,
+  runOnMigrationDb,
+  type MigrationDbHandle,
   reloadDatabaseCredential,
   mergeDatabaseCredentialPassword,
   type CredentialSource,
@@ -434,6 +437,12 @@ async function startServerWithDatabaseTeardown(
   let db;
   let pluginMigrationDb;
   let databaseCredentialSource: CredentialSource | undefined;
+  // On-demand migrator: no long-lived pool. When the migration credential is
+  // file-backed (DATABASE_MIGRATION_URL_FILE), each plugin-migration operation
+  // re-reads the file (fresh unique username + password) and uses a short-lived
+  // connection; no migrator connection outlives one operation.
+  let migrationDbProvider: MigrationDbHandle | undefined;
+  let migrationCredentialSource: CredentialSource | undefined;
   let embeddedPostgres: EmbeddedPostgresInstance | null = null;
   let embeddedPostgresSupervisor: EmbeddedPostgresSupervisor | null = null;
   let embeddedPostgresStartedByThisProcess = false;
@@ -449,12 +458,33 @@ async function startServerWithDatabaseTeardown(
     databaseCredentialSource = config.databaseUrlFile
       ? async () => (await readFile(resolve(config.databaseUrlFile!), "utf8")).trim()
       : undefined;
+    migrationCredentialSource = config.databaseMigrationUrlFile
+      ? async () => (await readFile(resolve(config.databaseMigrationUrlFile!), "utf8")).trim()
+      : undefined;
     // When migrations run against the application database (no separate
     // DATABASE_MIGRATION_URL) and the password is file-backed, resolve the
     // current credential target-checked so a password-protected DB is
     // reachable even when DATABASE_URL omits the password.
     let migrationConnectionString = migrationUrl;
-    if (!config.databaseMigrationUrl && databaseCredentialSource) {
+    if (config.databaseMigrationUrlFile && migrationCredentialSource) {
+      // File-backed migrator: read the current full URL (unique username +
+      // password) at startup and run migrations as that user — the same
+      // read/trim/validate-protocol handling the app pool uses, but fail-loud
+      // (a separate migration database has no app URL to fall back to).
+      const fileUrl = await Promise.resolve(migrationCredentialSource())
+        .then((u) => u.trim())
+        .catch(() => "");
+      let parsed;
+      try {
+        parsed = new URL(fileUrl);
+      } catch {
+        throw new Error("DATABASE_MIGRATION_URL_FILE does not contain a valid postgres:// or postgresql:// URL");
+      }
+      if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+        throw new Error("DATABASE_MIGRATION_URL_FILE must contain a postgres:// or postgresql:// URL");
+      }
+      migrationConnectionString = fileUrl;
+    } else if (!config.databaseMigrationUrl && databaseCredentialSource) {
       migrationConnectionString = await mergeDatabaseCredentialPassword(migrationUrl, databaseCredentialSource);
     }
     migrationSummary = await ensureMigrations(migrationConnectionString, "PostgreSQL");
@@ -484,7 +514,32 @@ async function startServerWithDatabaseTeardown(
       }
     }
     db = createDb(appConnectionString, { credentialSource: databaseCredentialSource });
-    pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
+    // File-backed migrator replaces the long-lived migration pool: plugin
+    // migrations run on-demand through migrationDbProvider (fresh connection
+    // per operation, re-read from the credential file). Only a static
+    // DATABASE_MIGRATION_URL keeps the legacy long-lived pool.
+    pluginMigrationDb = !config.databaseMigrationUrlFile && config.databaseMigrationUrl
+      ? createDb(config.databaseMigrationUrl)
+      : db;
+    if (config.databaseMigrationUrlFile && migrationCredentialSource) {
+      migrationDbProvider = createFileMigrationDbHandle({
+        readUrl: migrationCredentialSource,
+        createClient: (url) => createDb(url),
+        endClient: (client, timeout) => endDatabaseClient(client, timeout),
+      });
+    }
+    // Fail loud, not silently: with a file-backed migration credential the
+    // migrator must run plugin DDL on its own fresh connection. If the file is
+    // set but the provider was not built, falling back to the application pool
+    // would run plugin migrations as the app user — exactly the silent failure
+    // this path exists to rule out. The app pool is NOT a safe migration user
+    // (under the unique-username dynamic model it is itself file-backed).
+    if (config.databaseMigrationUrlFile && !migrationDbProvider) {
+      throw new Error(
+        "DATABASE_MIGRATION_URL_FILE is set but no file-backed migration provider was built; " +
+          "refusing to run plugin migrations against the application pool",
+      );
+    }
     logger.info("Using external PostgreSQL via DATABASE_URL/config");
     activeDatabaseConnectionString = appConnectionString;
     startupDbInfo = { mode: "external-postgres", connectionString: appConnectionString };
@@ -996,6 +1051,7 @@ async function startServerWithDatabaseTeardown(
     companyDeletionEnabled: config.companyDeletionEnabled,
     announcements: { enabled: config.announcementsEnabled, feedUrl: config.announcementsFeedUrl },
     pluginMigrationDb: pluginMigrationDb as any,
+    migrationDbProvider,
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,

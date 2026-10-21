@@ -31,7 +31,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Db } from "@paperclipai/db";
+import type { Db, MigrationDbHandle } from "@paperclipai/db";
+import { runOnMigrationDb } from "@paperclipai/db";
 import { PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import type {
   PaperclipPluginManifestV1,
@@ -287,6 +288,14 @@ export interface PluginLoaderOptions {
 
   /** Optional direct Postgres connection used for plugin DDL migrations. */
   migrationDb?: Db;
+
+  /**
+   * Optional file-backed migrator. When present, plugin DDL migrations run on
+   * a fresh short-lived connection per operation (re-read from the credential
+   * file, closed on completion) instead of the long-lived `migrationDb` pool,
+   * so a re-minted dynamic migrator role is always used.
+   */
+  migrationDbProvider?: MigrationDbHandle;
 
   /**
    * Whether to scan the local filesystem directory for plugins.
@@ -1152,6 +1161,7 @@ export function pluginLoader(
   const {
     localPluginDir = DEFAULT_LOCAL_PLUGIN_DIR,
     migrationDb = db,
+    migrationDbProvider,
     enableLocalFilesystem = true,
     enableNpmDiscovery = true,
     assertPackageActivation,
@@ -1737,8 +1747,7 @@ export function pluginLoader(
       // Step 6: Persist install record and apply plugin-owned schema migrations
       // in one database transaction. If migration validation fails, the plugin
       // row, namespace record, migration ledger, and created schema all roll back.
-      const installDb = manifest.database ? migrationDb : db;
-      await installDb.transaction(async (tx) => {
+      const doInstallTx = (client: Db) => client.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const txRegistry = pluginRegistryService(txDb);
         const installed = await txRegistry.install(
@@ -1762,6 +1771,12 @@ export function pluginLoader(
           );
         }
       });
+      // File-backed migrator runs the install on a fresh short-lived connection
+      // (re-read from the credential file, closed after); otherwise the shared
+      // pool (migrationDb, or the app pool db when no separate migration DB).
+      await (manifest.database
+        ? runOnMigrationDb(migrationDbProvider, migrationDb, doInstallTx)
+        : doInstallTx(db));
 
       log.info(
         {
@@ -2275,7 +2290,11 @@ export function pluginLoader(
       // 2. Apply restricted database migrations before worker startup
       // ------------------------------------------------------------------
       const databaseNamespace = manifest.database
-        ? (await pluginDatabaseService(migrationDb).applyMigrations(pluginId, manifest, packageRoot))?.namespaceName ?? null
+        ? (await runOnMigrationDb(
+            migrationDbProvider,
+            migrationDb,
+            async (client) => pluginDatabaseService(client).applyMigrations(pluginId, manifest, packageRoot),
+          ))?.namespaceName ?? null
         : null;
 
       // ------------------------------------------------------------------

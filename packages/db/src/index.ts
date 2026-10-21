@@ -1,5 +1,8 @@
 export {
   createDb,
+  createFileMigrationDbHandle,
+  runOnMigrationDb,
+  type MigrationDbHandle,
   reloadDatabaseCredential,
   resolveCurrentDatabaseCredential,
   mergeDatabaseCredentialPassword,

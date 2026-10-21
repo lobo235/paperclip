@@ -74,6 +74,7 @@ export interface Config {
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
   databaseUrlFile: string | undefined;
+  databaseMigrationUrlFile: string | undefined;
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
@@ -132,6 +133,16 @@ function detectTailnetBindHost(): string | undefined {
 
 export function loadConfig(): Config {
   const fileConfig = readConfigFile();
+  // DATABASE_MIGRATION_URL (static full URL) and DATABASE_MIGRATION_URL_FILE
+  // (file-backed dynamic credential) are two mutually exclusive ways to name the
+  // migrator database. Setting both is a config error: which one wins is
+  // ambiguous, so fail at load rather than pick silently.
+  if (process.env.DATABASE_MIGRATION_URL && process.env.DATABASE_MIGRATION_URL_FILE) {
+    throw new Error(
+      "DATABASE_MIGRATION_URL and DATABASE_MIGRATION_URL_FILE are mutually exclusive; " +
+        "set exactly one",
+    );
+  }
   const fileDatabaseMode =
     (fileConfig?.database.mode === "postgres" ? "postgres" : "embedded-postgres") as DatabaseMode;
 
@@ -372,6 +383,7 @@ export function loadConfig(): Config {
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
     databaseUrlFile: process.env.DATABASE_URL_FILE,
+    databaseMigrationUrlFile: process.env.DATABASE_MIGRATION_URL_FILE,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),

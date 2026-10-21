@@ -283,6 +283,58 @@ export function createDb(url: string, options?: DatabaseClientOptions & { creden
   return createDbClient(url, resolved, undefined, credentialSource);
 }
 
+/**
+ * Runs one bounded plugin-migration operation against a migrator database and
+ * owns that connection's lifetime: acquire a fresh connection, run the
+ * operation, then close it. A file-backed migrator re-reads its credential
+ * file on every `run`, so a re-minted dynamic role (fresh unique username +
+ * password) is always used and no migrator connection outlives one operation.
+ */
+export type MigrationDbHandle = {
+  run<T>(op: (db: Db) => Promise<T>): Promise<T>;
+};
+
+/**
+ * Builds an on-demand migrator handle. The three dependencies are injected so
+ * the acquire/run/close lifecycle is testable without a live database:
+ *   - readUrl:     re-reads the credential (e.g. a rendered Vault KV file), trimmed
+ *   - createClient: opens a fresh short-lived connection from a full URL
+ *   - endClient:   closes that connection after the operation
+ */
+export function createFileMigrationDbHandle(opts: {
+  readUrl: () => string | Promise<string>;
+  createClient: (url: string) => Db;
+  endClient: (db: Db, timeoutSeconds: number) => Promise<void>;
+  timeoutSeconds?: number;
+}): MigrationDbHandle {
+  const timeoutSeconds = opts.timeoutSeconds ?? 5;
+  return {
+    run: async <T>(op: (db: Db) => Promise<T>): Promise<T> => {
+      const url = (await opts.readUrl()).trim();
+      const db = opts.createClient(url);
+      try {
+        return await op(db);
+      } finally {
+        await opts.endClient(db, timeoutSeconds);
+      }
+    },
+  };
+}
+
+/**
+ * Runs a bounded plugin-migration operation. When a file-backed migrator
+ * handle is present it is used (fresh connection per operation, re-read from
+ * the credential file, closed on completion); otherwise the shared app pool is
+ * used directly and is never closed here (its lifetime is managed elsewhere).
+ */
+export function runOnMigrationDb<T>(
+  provider: MigrationDbHandle | undefined,
+  fallback: Db,
+  op: (db: Db) => Promise<T>,
+): Promise<T> {
+  return provider ? provider.run(op) : op(fallback);
+}
+
 function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: object, credentialSource?: CredentialSource) {
   const sql = postgres(url, {
     ...postgresJsOptions(resolved),

@@ -45,7 +45,7 @@ import {
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Db } from "@paperclipai/db";
+import type { Db, MigrationDbHandle } from "@paperclipai/db";
 import {
   derivePaperclipViteHmrPort,
   type DeploymentExposure,
@@ -527,6 +527,7 @@ export async function createApp(
     hostVersion?: string;
     localPluginDir?: string;
     pluginMigrationDb?: Db;
+    migrationDbProvider?: MigrationDbHandle;
     pluginWorkerManager?: PluginWorkerManager;
     decisionServiceOptions: DecisionServiceOptions;
     betterAuthHandler?: express.RequestHandler;
@@ -985,6 +986,7 @@ export async function createApp(
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
       migrationDb: opts.pluginMigrationDb,
+      migrationDbProvider: opts.migrationDbProvider,
       assertPackageActivation: distributionPluginActivationGuard(bundledCatalogRoot, distributionPlugins, managedAutoInstallKeys),
     },
     {
